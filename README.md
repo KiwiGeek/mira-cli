@@ -4,12 +4,38 @@
 
 Repository: [https://github.com/KiwiGeek/mira-cli](https://github.com/KiwiGeek/mira-cli)
 
+## Quick install (recommended)
+
+**Windows (PowerShell)** — clones into `%LOCALAPPDATA%\mira-cli`, installs deps + Chromium, adds `%LOCALAPPDATA%\mira-cli\bin` to your **user** PATH (commands: `mira`, `mira-cli`):
+
+```powershell
+irm https://raw.githubusercontent.com/KiwiGeek/mira-cli/master/scripts/install.ps1 | iex
+```
+
+If your default branch is `main`, replace `master` in that URL. Optional overrides:
+
+| Environment variable   | Meaning |
+|------------------------|---------|
+| `MIRA_INSTALL_REPO`    | Git URL (default: this repo) |
+| `MIRA_INSTALL_BRANCH`  | Branch (default: `master`) |
+| `MIRA_INSTALL_DIR`     | Install root (default: `%LOCALAPPDATA%\mira-cli`) |
+
+On Windows without **winget**, install [Node.js 20+](https://nodejs.org/) and [Git](https://git-scm.com/) yourself, then run the script again.
+
+**macOS / Linux** — review then run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/KiwiGeek/mira-cli/master/scripts/install.sh | bash
+```
+
+Uses `$HOME/.local/share/mira-cli` and writes `mira` + `mira-cli` under `$HOME/.local/bin` (add that dir to `PATH` if the script says so).
+
 ## Requirements
 
 - **Node.js** 20+
 - npm
 
-## Setup
+## Setup (manual / from source)
 
 ```bash
 git clone https://github.com/KiwiGeek/mira-cli.git
@@ -26,7 +52,9 @@ This project’s `.gitignore` excludes `dist/` and `node_modules/`, so you **mus
 Save your logged-in ChatGPT session into the Playwright profile:
 
 ```bash
-npm run login
+mira login
+# or: mira-cli login
+# from repo: npm run login
 ```
 
 Complete sign-in in the browser window, then press Enter in the terminal when ready.
@@ -34,8 +62,11 @@ Complete sign-in in the browser window, then press Enter in the terminal when re
 ## Daily use
 
 ```bash
-npm run mira
+mira
+# or: mira-cli
 ```
+
+From a dev clone you can still use `npm run mira`.
 
 By default the browser window is **hidden** from the taskbar and Alt+Tab on Windows (headed Chromium, not headless). Use **`--show-window`** or **`--no-hide`** for a normal visible window.
 

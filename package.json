@@ -5,7 +5,8 @@
   "type": "module",
   "bin": {
     "chatgpt-repl": "./dist/cli.js",
-    "mira": "./dist/cli.js"
+    "mira": "./dist/cli.js",
+    "mira-cli": "./dist/cli.js"
   },
   "scripts": {
     "build": "tsc",
