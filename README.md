@@ -30,6 +30,8 @@ curl -fsSL https://raw.githubusercontent.com/KiwiGeek/mira-cli/master/scripts/in
 
 Uses `$HOME/.local/share/mira-cli` and writes `mira` + `mira-cli` under `$HOME/.local/bin` (add that dir to `PATH` if the script says so).
 
+**Windows Terminal:** A profile like `pwsh -NoExit -Command mira` often **does not load** `$PROFILE`, so `PATH` (or `PLAYWRIGHT_BROWSERS_PATH`) can differ from your normal PowerShell tab. Either use `pwsh -NoExit -Command "& $PROFILE; mira"` or install Chromium from the Mira folder: `cd $env:LOCALAPPDATA\mira-cli` then `npx playwright install chromium`.
+
 ## Requirements
 
 - **Node.js** 20+

@@ -3,8 +3,9 @@ import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import fs from "node:fs";
 import path from "node:path";
-import { defaultProfileDir } from "./paths.js";
+import { defaultProfileDir, packageRoot } from "./paths.js";
 import { launchChatGptContext } from "./launch.js";
+import { chromiumInstallHint } from "./playwrightHint.js";
 import { CHAT_URL, ChatGptSession, openPage } from "./session.js";
 import { hideBrowserWindow, showBrowserWindow } from "./hideWindow.js";
 import { diagnoseBrowserWindows, isWin32, windowDebugEnabled } from "./win32Window.js";
@@ -17,6 +18,18 @@ import {
   type AssistantStreamLineState,
 } from "./assistantFormat.js";
 import { createMultilineReplInput } from "./replInput.js";
+
+function reportPlaywrightLaunchFailure(e: unknown): never {
+  const msg = e instanceof Error ? e.message : String(e);
+  const looksPlaywright =
+    msg.includes("Executable doesn't exist") || msg.includes("browserType.launchPersistentContext");
+  if (looksPlaywright) {
+    console.error(chromiumInstallHint(packageRoot()));
+  } else {
+    console.error(msg);
+  }
+  process.exit(1);
+}
 
 function validateChatUrl(raw: string): string | undefined {
   try {
@@ -161,7 +174,12 @@ async function runLogin(profileDir: string): Promise<void> {
   console.log(`  ${ui.dim("Sign in at")} ${CHAT_URL}`);
   ui.line();
   console.log();
-  const context = await launchChatGptContext(profileDir, false);
+  let context;
+  try {
+    context = await launchChatGptContext(profileDir, false);
+  } catch (e) {
+    reportPlaywrightLaunchFailure(e);
+  }
   try {
     const page = await openPage(context);
     await page.goto(CHAT_URL, { waitUntil: "domcontentloaded" });
@@ -173,7 +191,7 @@ async function runLogin(profileDir: string): Promise<void> {
   } finally {
     await context.close();
   }
-  console.log(ui.dim("Session saved.") + " Run " + ui.gray("npm run mira") + " anytime.");
+  console.log(ui.dim("Session saved.") + " Run " + ui.gray("mira") + " anytime.");
 }
 
 function releaseReplTerminal(): void {
@@ -209,13 +227,7 @@ async function runRepl(
       spawnOffScreen: hideWindow,
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (msg.includes("Executable doesn't exist") || msg.includes("browserType.launchPersistentContext")) {
-      console.error("Chromium is not installed for Playwright. Run: npx playwright install chromium");
-    } else {
-      console.error(msg);
-    }
-    process.exit(1);
+    reportPlaywrightLaunchFailure(e);
   }
 
   const page = await openPage(context);
@@ -419,16 +431,14 @@ async function runRepl(
     try {
       if (onExit !== "none") {
         const r = await session.finalizeConversation(onExit);
-        if (!r.acted) {
-          ui.warn("No /c/… thread in the address bar — exit cleanup skipped.");
-        } else if (!r.ok) {
+        if (r.acted && !r.ok) {
           ui.warn(
             "Exit cleanup didn’t finish (ChatGPT UI may have shifted). Check the browser. " +
               "For traces: --debug-archive or CHATGPT_REPL_DEBUG_ARCHIVE=1.",
           );
-        } else if (onExit === "archive" && r.conversationUrl) {
+        } else if (r.acted && onExit === "archive" && r.conversationUrl) {
           ui.resumeCommand(`npm run mira -- --chat-url "${r.conversationUrl}"`);
-        } else if (onExit === "delete") {
+        } else if (r.acted && onExit === "delete") {
           ui.ok("Conversation deleted.");
         }
       }
