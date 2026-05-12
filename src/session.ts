@@ -37,7 +37,56 @@ async function lastAssistantText(page: Page): Promise<string> {
   const loc = assistantMessageLocator(page);
   const n = await loc.count();
   if (n === 0) return "";
-  return (await loc.nth(n - 1).innerText()).trim();
+  return (
+    await loc.nth(n - 1).evaluate((el: HTMLElement) => {
+      const norm = (t: string) => t.replace(/\r\n/g, "\n").trimEnd();
+      if (!el.querySelector("li")) {
+        return norm(el.innerText);
+      }
+
+      const out: string[] = [];
+      const root = el;
+
+      function emitList(listEl: Element): void {
+        for (const child of listEl.children) {
+          if (child.tagName.toLowerCase() !== "li") continue;
+          const li = child as HTMLElement;
+          const c = li.cloneNode(true) as HTMLElement;
+          c.querySelectorAll("ul, ol").forEach((u) => u.remove());
+          const text = (c.textContent ?? "").replace(/\s+/g, " ").trim();
+          let depth = 0;
+          let p: Element | null = li.parentElement;
+          while (p && p !== root) {
+            if (p.tagName === "UL" || p.tagName === "OL") depth++;
+            p = p.parentElement;
+          }
+          if (text.length > 0) out.push(`${"  ".repeat(Math.max(0, depth - 1))}- ${text}`);
+          for (const nested of li.querySelectorAll(":scope > ul, :scope > ol")) {
+            emitList(nested);
+          }
+        }
+      }
+
+      function walk(node: Node): void {
+        if (node.nodeType === Node.TEXT_NODE) {
+          const t = (node.textContent ?? "").replace(/\s+/g, " ").trim();
+          if (t.length > 0) out.push(t);
+          return;
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) return;
+        const e = node as Element;
+        const tag = e.tagName.toLowerCase();
+        if (tag === "ul" || tag === "ol") {
+          emitList(e);
+          return;
+        }
+        for (const c of e.childNodes) walk(c);
+      }
+
+      for (const c of el.childNodes) walk(c);
+      return norm(out.join("\n"));
+    })
+  ).trimEnd();
 }
 
 async function waitForStopHidden(page: Page, timeoutMs: number): Promise<void> {
@@ -69,7 +118,7 @@ async function finalizeAssistantReply(
 ): Promise<string> {
   let cur = lastKnown;
   let identicalPolls = 0;
-  const needIdentical = 4;
+  const needIdentical = 5;
   const tailBudget = 6_000;
   const tailUntil = Date.now() + tailBudget;
 
@@ -107,8 +156,8 @@ async function waitForAssistantReply(
 ): Promise<string> {
   const onDelta = stream.onDelta;
   const pollStart = onDelta ? 160 : 200;
-  const pollTail = onDelta ? 280 : 450;
-  const stableNeed = onDelta ? 5 : 3;
+  const pollTail = onDelta ? 300 : 450;
+  const stableNeed = onDelta ? 8 : 3;
 
   const emit = (cur: string) => {
     if (onDelta && cur && cur !== before) onDelta(cur);
@@ -161,10 +210,16 @@ export class ChatGptSession {
     private readonly headless: boolean,
   ) {}
 
-  async openChat(startUrl?: string): Promise<void> {
+  async openChat(
+    startUrl?: string,
+    hooks?: { afterNavigate?: () => Promise<void> },
+  ): Promise<void> {
     const target = (startUrl?.trim() || CHAT_URL).trim();
     const deepThread = /\/c\/[^/?#]+/.test(new URL(target, "https://chatgpt.com/").pathname);
     await this.page.goto(target, { waitUntil: deepThread ? "load" : "domcontentloaded" });
+    if (hooks?.afterNavigate) {
+      await hooks.afterNavigate();
+    }
     try {
       await waitForComposerMount(this.page, COMPOSER_READY_MS);
     } catch (e) {

@@ -8,7 +8,15 @@ import { launchChatGptContext } from "./launch.js";
 import { CHAT_URL, ChatGptSession, openPage } from "./session.js";
 import { hideBrowserWindow, showBrowserWindow } from "./hideWindow.js";
 import { diagnoseBrowserWindows, isWin32, windowDebugEnabled } from "./win32Window.js";
-import { defaultInstructionsPath, loadCliInstructions } from "./cliInstructions.js";
+import { defaultInstructionsPath, loadCliInstructions, CLI_USER_MESSAGE_SEPARATOR } from "./cliInstructions.js";
+import { ui } from "./replUi.js";
+import {
+  formatAssistantBullets,
+  streamFormatCompleteLines,
+  streamFormatFlushTail,
+  type AssistantStreamLineState,
+} from "./assistantFormat.js";
+import { createMultilineReplInput } from "./replInput.js";
 
 function validateChatUrl(raw: string): string | undefined {
   try {
@@ -29,57 +37,60 @@ function validateChatUrl(raw: string): string | undefined {
   }
 }
 
+function helpRow(cmd: string, desc: string): void {
+  console.log(`    ${ui.cyan(cmd.padEnd(16))} ${ui.dim(desc)}`);
+}
+
 function printHelp(): void {
-  console.log(`Mira — CLI for ChatGPT (web / Pro session). Chromium profile, no OpenAI API key.
+  console.log();
+  ui.line();
+  console.log(`  ${ui.bold("Mira")}  ${ui.gray("·")}  ${ui.dim("ChatGPT in the terminal (browser session; no API key)")}`);
+  ui.line();
 
-Usage:
-  chatgpt-repl login [--profile DIR]     Open Chromium; sign in; press Enter when ready.
-  chatgpt-repl [--profile DIR] [--headless] [--show-window | --no-hide] [--no-prime] [--no-stream]
-                 [--debug-window] [--debug-archive] [--on-exit none|archive|delete] [--chat-url URL]
+  console.log(`  ${ui.bold(ui.cyan("Usage"))}`);
+  console.log(`    ${ui.gray("chatgpt-repl login")} ${ui.dim("[--profile DIR]")}`);
+  console.log(`      ${ui.dim("Open Chromium, sign in, press Enter when ready.")}`);
+  console.log(`    ${ui.gray("chatgpt-repl")} ${ui.dim("[options…]")}`);
+  console.log(
+    `      ${ui.dim("Interactive REPL: ")}${ui.cyan("Shift+Enter")}${ui.dim(" newline; Enter sends. Pipes: line ends with ")}${ui.gray("\\")}${ui.dim(" + Enter.")}`,
+  );
+  console.log();
 
-First-time setup:
-  npm install
-  npx playwright install chromium
+  console.log(`  ${ui.bold(ui.cyan("First time"))}`);
+  console.log(`    ${ui.gray("npm install")} ${ui.dim("·")} ${ui.gray("npx playwright install chromium")}`);
+  console.log();
 
-Custom instructions (optional): create or edit
-  ${defaultInstructionsPath()}
-  to replace the built-in preamble (e.g. how Mira should sound).
+  console.log(`  ${ui.bold(ui.cyan("Custom instructions"))}`);
+  console.log(`    ${ui.dim("Optional file replaces the built-in preamble:")}`);
+  console.log(`    ${ui.gray(defaultInstructionsPath())}`);
+  console.log();
 
-REPL commands:
-  /new           Start a new chat (best effort; may use ${CHAT_URL})
-  /name …        Rename the current chat (web UI ⋯ → Rename). Alias: /rename
-  /show          Restore the browser window after hidden mode (Win32 hide / show)
-  /debug-window  List top-level HWNDs for the browser PID tree (Windows, stderr)
-  /help          This text
-  /quit          Exit (default: archive thread and print --chat-url resume command)
+  console.log(`  ${ui.bold(ui.cyan("REPL commands"))}`);
+  helpRow("/new", `New chat (opens ${CHAT_URL})`);
+  helpRow("/name …", "Rename thread (alias /rename)");
+  helpRow("/show", "Show browser, move window on-screen (Win32 + CDP)");
+  helpRow("/debug-window", "Dump HWNDs (Windows · stderr)");
+  helpRow("/help", "This help");
+  helpRow("/quit", "Exit — archives by default, prints --chat-url resume");
+  console.log();
 
-Flags:
-  (default)        Headed browser is hidden after load: moved off taskbar / Alt+Tab on Windows, then
-                   SW_HIDE (or CDP off-screen fallback). No minimize.
-  --show-window    Do not hide: keep the browser fully visible and on the taskbar like a normal window.
-  --no-hide        Same as --show-window.
-  --hide-window    Same as default (explicit); kept for scripts that already pass it.
-  --debug-window   Log Win32 hide steps to stderr when hiding runs (default mode). Little effect with
-                   --show-window / --no-hide, since nothing is hidden.
-  --debug-archive  Log --on-exit archive/delete steps to stderr (menus, clicks, DOM snapshot). Or set
-                   CHATGPT_REPL_DEBUG_ARCHIVE=1.
-  --no-stream      Buffer each reply: print the full answer once (no token-at-a-time from DOM polling).
-  --on-exit MODE   On /quit: archive (default), delete, or none. archive prints a --chat-url command to
-                   resume. delete removes the chat. none skips cleanup.
-  --chat-url URL   Start on this chat thread (https://chatgpt.com/c/…). Skips the initial priming
-                   message (session already has context). Use the command printed when exiting after archive.
+  console.log(`  ${ui.bold(ui.cyan("Flags"))}`);
+  helpRow("(default)", "Headed browser, hidden off taskbar after load (Win32 / CDP)");
+  helpRow("--show-window", "Keep browser visible (--no-hide)");
+  helpRow("--hide-window", "Explicit default hidden mode");
+  helpRow("--headless", "Headless Chromium (ignored if hidden-window mode is on)");
+  helpRow("--profile DIR", "Persistent browser profile directory");
+  helpRow("--debug-window / --debug-archive", "Verbose stderr; or set CHATGPT_REPL_DEBUG_*");
+  helpRow("--no-stream", "Print each reply as one block");
+  helpRow("--on-exit", "none | archive (default) | delete");
+  helpRow("--chat-url", "Resume thread URL; skips merged first-message instructions");
+  helpRow("--no-prime", "Do not merge CLI instructions into the first message");
+  helpRow("--verbose", "Print startup tips (browser hide, first-message primer); or CHATGPT_REPL_VERBOSE=1");
+  console.log();
 
-Notes:
-  Replies stream by polling the last assistant bubble in the page (no CDP/WebSocket to the model);
-  use --no-stream if you prefer one block of text. Priming stays buffered.
-  ChatGPT’s DOM changes often; if sending breaks, update src/selectors.ts.
-  --on-exit runs when the REPL exits via /quit (and similar normal teardown). Default is archive; use
-  --on-exit delete or none to change. Ctrl+C may terminate the process before cleanup runs.
-  Headless may be blocked; try CHATGPT_REPL_CHANNEL=chrome if you have Google Chrome installed.
-  [mira/…] lines are stderr (same console as normal output). Capture: PowerShell
-  npm run mira -- --debug-window 2>&1 | Tee-Object mira.log
-  npm run mira -- --debug-archive 2>&1 | Tee-Object mira-archive.log
-`);
+  console.log(`  ${ui.dim("Streaming reads the page DOM; if sending breaks, adjust selectors. Set NO_COLOR=1 to strip ANSI.")}`);
+  ui.line();
+  console.log();
 }
 
 function parseArgs(argv: string[]): {
@@ -91,6 +102,7 @@ function parseArgs(argv: string[]): {
   noStream: boolean;
   onExit: "none" | "archive" | "delete";
   chatUrl?: string;
+  verbose: boolean;
 } {
   let profileDir = defaultProfileDir();
   let headless = false;
@@ -100,6 +112,7 @@ function parseArgs(argv: string[]): {
   let onExit: "none" | "archive" | "delete" = "archive";
   let chatUrl: string | undefined;
   let cmd: "repl" | "login" = "repl";
+  let verbose = process.env.CHATGPT_REPL_VERBOSE === "1";
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -109,6 +122,7 @@ function parseArgs(argv: string[]): {
     else if (a === "--hide-window") hideWindow = true;
     else if (a === "--no-prime") noPrime = true;
     else if (a === "--no-stream") noStream = true;
+    else if (a === "--verbose") verbose = true;
     else if (a === "--debug-window") process.env.CHATGPT_REPL_DEBUG_WINDOW = "1";
     else if (a === "--debug-archive") process.env.CHATGPT_REPL_DEBUG_ARCHIVE = "1";
     else if (a === "--on-exit" && argv[i + 1]) {
@@ -132,7 +146,7 @@ function parseArgs(argv: string[]): {
     console.warn("Note: hidden window mode needs a headed browser; --headless is ignored.");
     headless = false;
   }
-  return { cmd, profileDir, headless, hideWindow, noPrime, noStream, onExit, chatUrl };
+  return { cmd, profileDir, headless, hideWindow, noPrime, noStream, onExit, chatUrl, verbose };
 }
 
 async function ensureProfileDir(dir: string): Promise<void> {
@@ -141,31 +155,40 @@ async function ensureProfileDir(dir: string): Promise<void> {
 
 async function runLogin(profileDir: string): Promise<void> {
   await ensureProfileDir(profileDir);
-  console.log(`Launching Chromium with profile: ${profileDir}`);
-  console.log(`Opening ${CHAT_URL} — sign in with your ChatGPT account.`);
+  ui.line();
+  console.log(`  ${ui.bold("Login")}  ${ui.dim("— opening Chromium with profile:")}`);
+  console.log(`  ${ui.gray(profileDir)}`);
+  console.log(`  ${ui.dim("Sign in at")} ${CHAT_URL}`);
+  ui.line();
+  console.log();
   const context = await launchChatGptContext(profileDir, false);
   try {
     const page = await openPage(context);
     await page.goto(CHAT_URL, { waitUntil: "domcontentloaded" });
     const rl = readline.createInterface({ input, output });
-    await rl.question("When you see the chat UI and are logged in, press Enter here to save and close... ");
+    await rl.question(
+      ui.dim("When the chat UI looks good, press Enter here to save and close… "),
+    );
     rl.close();
   } finally {
     await context.close();
   }
-  console.log("Session saved. Run `npm run repl` or `npm run mira` to talk to Mira.");
+  console.log(ui.dim("Session saved.") + " Run " + ui.gray("npm run mira") + " anytime.");
 }
 
-async function primeCliMode(session: ChatGptSession, skip: boolean): Promise<void> {
-  if (skip) return;
-  const instructions = loadCliInstructions().trim();
-  if (!instructions) return;
-  process.stdout.write("Priming Mira (plain-text CLI instructions)... ");
+function releaseReplTerminal(): void {
   try {
-    await session.send(instructions, { responseTimeoutMs: 180_000 });
-    console.log("done.\n");
-  } catch (e) {
-    console.log(`failed: ${e instanceof Error ? e.message : String(e)}\n`);
+    if (input.isTTY && input.isRaw) {
+      input.setRawMode(false);
+    }
+  } catch {
+    /* ignore */
+  }
+  input.removeAllListeners("keypress");
+  try {
+    input.pause();
+  } catch {
+    /* ignore */
   }
 }
 
@@ -176,12 +199,15 @@ async function runRepl(
   noPrime: boolean,
   noStream: boolean,
   onExit: "none" | "archive" | "delete",
-  chatUrl?: string,
+  chatUrl: string | undefined,
+  verbose: boolean,
 ): Promise<void> {
   await ensureProfileDir(profileDir);
   let context;
   try {
-    context = await launchChatGptContext(profileDir, headless);
+    context = await launchChatGptContext(profileDir, headless, {
+      spawnOffScreen: hideWindow,
+    });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (msg.includes("Executable doesn't exist") || msg.includes("browserType.launchPersistentContext")) {
@@ -194,7 +220,35 @@ async function runRepl(
 
   const page = await openPage(context);
   const session = new ChatGptSession(page, headless);
-  await session.openChat(chatUrl);
+
+  let hideTipShown = false;
+  async function tryConcealBrowser(opts?: { warnOnFailure?: boolean }): Promise<void> {
+    if (!hideWindow) return;
+    try {
+      const hid = await hideBrowserWindow(page, profileDir);
+      if (!hideTipShown && (hid.usedWin32 || hid.usedCdpOffScreen)) {
+        hideTipShown = true;
+        if (verbose) {
+          if (hid.usedWin32) {
+            ui.tip("Browser tucked away (Windows: off taskbar / Alt+Tab). /show brings it back.");
+          } else if (hid.usedCdpOffScreen) {
+            ui.tip("Browser nudged off-screen (CDP). May still show a taskbar icon; Win32 hide missed or non-Windows.");
+          }
+        }
+      }
+    } catch (err) {
+      if (opts?.warnOnFailure) {
+        const msg = err instanceof Error ? err.message : String(err);
+        ui.warn(`Could not hide the browser window: ${msg}`);
+      }
+    }
+  }
+
+  await tryConcealBrowser();
+
+  await session.openChat(chatUrl, {
+    afterNavigate: hideWindow ? () => tryConcealBrowser({ warnOnFailure: true }) : undefined,
+  });
 
   if (windowDebugEnabled() && !hideWindow) {
     console.error(
@@ -203,125 +257,187 @@ async function runRepl(
     );
   }
 
-  if (hideWindow) {
+  let pendingPrime = !noPrime && !chatUrl ? loadCliInstructions().trim() : "";
+
+  if (pendingPrime && verbose) {
+    console.log(`  ${ui.dim("CLI instructions will be sent with your first message (one assistant reply).")}`);
+    console.log();
+  }
+
+  ui.banner({ resumedChat: Boolean(chatUrl) });
+
+  const replIn = createMultilineReplInput({
+    getPrompt: () => ui.promptYou(),
+    historySize: 100,
+  });
+
+  async function sendChatMessage(toSend: string): Promise<void> {
+    ui.printUserMessageBubble(toSend);
+
+    let payload = toSend;
+    if (pendingPrime) {
+      payload = `${pendingPrime}${CLI_USER_MESSAGE_SEPARATOR}${toSend}`;
+      pendingPrime = "";
+    }
+
+    ui.miraReplyBegin();
+    const spin = ui.replyInlineSpinnerStart();
+    let stopped = false;
+    const stopSpin = () => {
+      if (!stopped) {
+        spin.stop();
+        stopped = true;
+      }
+    };
+
+    const box = ui.createReplyBoxWriter();
+
+    const openBox = (): void => {
+      if (box.isOpen()) return;
+      stopSpin();
+      ui.prepForReplyBoxOpen();
+      box.open();
+    };
+
     try {
-      const hid = await hideBrowserWindow(page, profileDir);
-      if (hid.usedWin32) {
-        console.log(
-          "(Mira: browser hidden via Windows API — off taskbar / Alt+Tab; /show to restore)\n",
-        );
-      } else if (hid.usedCdpOffScreen) {
-        console.log(
-          "(Mira: browser moved off-screen via CDP — may still have a taskbar button; Win32 hide failed or non-Windows.)\n",
-        );
+      if (noStream) {
+        const reply = await session.send(payload);
+        const norm = reply.replace(/\r\n/g, "\n");
+        if (norm.trim()) {
+          openBox();
+          box.write(formatAssistantBullets(norm));
+        }
+      } else {
+        const streamState: AssistantStreamLineState = { committed: 0 };
+        let bodyStarted = false;
+        const reply = await session.send(payload, {
+          onAssistantDelta: (full: string) => {
+            const norm = full.replace(/\r\n/g, "\n");
+            const { chunk } = streamFormatCompleteLines(streamState, norm);
+            if (!chunk) return;
+            if (!bodyStarted) {
+              bodyStarted = true;
+              openBox();
+            }
+            box.write(chunk);
+          },
+        });
+        const norm = reply.replace(/\r\n/g, "\n");
+        let rest = streamFormatCompleteLines(streamState, norm).chunk;
+        rest += streamFormatFlushTail(streamState, norm);
+        if (rest) {
+          if (!bodyStarted) {
+            bodyStarted = true;
+            openBox();
+          }
+          box.write(rest);
+        }
+        if (!bodyStarted && norm.trim()) {
+          openBox();
+          box.write(formatAssistantBullets(norm));
+        }
       }
     } catch (err) {
+      process.stdout.write("\n");
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`Could not hide the browser window: ${msg}\n`);
+      ui.err(msg);
+    } finally {
+      stopSpin();
+      if (box.isOpen()) box.close();
+      process.stdout.write("\n");
     }
   }
 
-  await primeCliMode(session, noPrime || Boolean(chatUrl));
-
-  console.log("Mira — type a message, or /help. Ctrl+C to exit.\n");
-
-  const rl = readline.createInterface({ input, output, historySize: 100 });
-
   try {
     for (;;) {
-      const line = (await rl.question("you> ")).trim();
-      if (!line) continue;
-      if (line === "/quit" || line === "/exit") break;
-      if (line === "/help") {
+      const inRes = await replIn.read();
+      if (inRes.kind === "interrupt") {
+        console.log(`  ${ui.dim("Shutting down…")}\n`);
+        break;
+      }
+
+      const raw = inRes.text.replace(/\r\n/g, "\n");
+      if (!raw.trim()) continue;
+
+      const singleLine = !raw.includes("\n");
+      const one = raw.trim();
+
+      if (singleLine && (one === "/quit" || one === "/exit")) {
+        console.log(`  ${ui.dim("Shutting down…")}\n`);
+        break;
+      }
+      if (singleLine && one === "/help") {
         printHelp();
         continue;
       }
-      if (line.startsWith("/name ") || line.startsWith("/rename ")) {
-        const title = line.replace(/^\/(name|rename)\s+/, "").trim();
+      if (singleLine && (one.startsWith("/name ") || one.startsWith("/rename "))) {
+        const title = one.replace(/^\/(name|rename)\s+/, "").trim();
         if (!title) {
-          console.log("(usage: /name <new title>)\n");
+          ui.tip("Usage: /name <new title>");
           continue;
         }
         const ok = await session.renameChat(title);
-        console.log(ok ? `(renamed chat)\n` : `(could not rename — check the browser or update selectors)\n`);
+        if (ok) ui.ok("Chat renamed.");
+        else ui.warn("Rename didn’t land — tweak selectors or finish in the browser.");
         continue;
       }
-      if (line === "/name" || line === "/rename") {
-        console.log("(usage: /name <new title>)\n");
+      if (singleLine && (one === "/name" || one === "/rename")) {
+        ui.tip("Usage: /name <new title>");
         continue;
       }
-      if (line === "/new") {
-        await session.newConversation();
-        await primeCliMode(session, noPrime);
-        console.log("(new conversation)\n");
+      if (singleLine && one === "/new") {
+        try {
+          await session.newConversation();
+          pendingPrime = !noPrime ? loadCliInstructions().trim() : "";
+          ui.ok("New conversation. Blank slate, same swagger.");
+        } catch (e) {
+          ui.err(e instanceof Error ? e.message : String(e));
+        }
         continue;
       }
-      if (line === "/show") {
+      if (singleLine && one === "/show") {
         const ok = await showBrowserWindow(page, profileDir);
-        console.log(
-          ok
-            ? "(Mira: browser window restored)\n"
-            : "(Mira: could not restore via Win32 — if the window was only moved off-screen, use the taskbar or Alt+Tab)\n",
-        );
+        if (ok) ui.ok("Window restored.");
+        else ui.warn("Win32 restore missed — try taskbar or Alt+Tab if it was only off-screen.");
         continue;
       }
-      if (line === "/debug-window") {
+      if (singleLine && one === "/debug-window") {
         if (!isWin32()) {
-          console.log("(/debug-window is only available on Windows.)\n");
+          ui.tip("/debug-window is Windows-only.");
         } else {
-          console.log("(see stderr for HWND dump)\n");
+          ui.tip("HWND dump on stderr.");
           diagnoseBrowserWindows(page, profileDir);
         }
         continue;
       }
 
-      process.stdout.write("mira> ");
-      try {
-        if (noStream) {
-          const reply = await session.send(line);
-          console.log(reply + "\n");
-        } else {
-          let printed = 0;
-          const reply = await session.send(line, {
-            onAssistantDelta: (full: string) => {
-              if (full.length > printed) {
-                process.stdout.write(full.slice(printed));
-                printed = full.length;
-              }
-            },
-          });
-          if (reply.length > printed) process.stdout.write(reply.slice(printed));
-          process.stdout.write("\n");
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.log(`(error) ${msg}\n`);
-      }
+      const toSend = raw.trimEnd();
+      await sendChatMessage(toSend);
     }
   } finally {
-    rl.close();
+    releaseReplTerminal();
     try {
       if (onExit !== "none") {
-        if (hideWindow) await showBrowserWindow(page, profileDir).catch(() => undefined);
         const r = await session.finalizeConversation(onExit);
         if (!r.acted) {
-          console.log("\n[mira] No /c/… thread in the address bar — skipped exit cleanup.\n");
+          ui.warn("No /c/… thread in the address bar — exit cleanup skipped.");
         } else if (!r.ok) {
-          console.warn(
-            "\n[mira] Exit cleanup did not complete (UI may have changed). Finish in the browser if needed.\n" +
-              "      Run with --debug-archive (or CHATGPT_REPL_DEBUG_ARCHIVE=1) for stderr traces.\n",
+          ui.warn(
+            "Exit cleanup didn’t finish (ChatGPT UI may have shifted). Check the browser. " +
+              "For traces: --debug-archive or CHATGPT_REPL_DEBUG_ARCHIVE=1.",
           );
         } else if (onExit === "archive" && r.conversationUrl) {
-          console.log("\nArchived. Resume this chat (opens it; brings it back from archive):");
-          console.log(`  npm run mira -- --chat-url "${r.conversationUrl}"\n`);
+          ui.resumeCommand(`npm run mira -- --chat-url "${r.conversationUrl}"`);
         } else if (onExit === "delete") {
-          console.log("\nConversation deleted.\n");
+          ui.ok("Conversation deleted.");
         }
       }
     } catch (e) {
       console.warn("[mira] exit cleanup error:", e instanceof Error ? e.message : String(e));
     }
+    ui.goodbye();
     await context.close();
+    process.exit(0);
   }
 }
 
@@ -341,5 +457,6 @@ if (parsed.cmd === "login") {
     parsed.noStream,
     parsed.onExit,
     parsed.chatUrl,
+    parsed.verbose,
   );
 }

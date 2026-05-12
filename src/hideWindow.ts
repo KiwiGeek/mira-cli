@@ -44,6 +44,41 @@ async function hideBrowserWindowCdpOffScreen(page: Page): Promise<void> {
   }
 }
 
+/** Move browser window onto the primary display (for /show after CDP off-screen or spawn). */
+async function restoreBrowserWindowOnScreen(page: Page): Promise<void> {
+  const session = await page.context().newCDPSession(page);
+
+  const targets = (await session.send("Target.getTargets")) as { targetInfos?: TargetInfo[] };
+  const current = page.url();
+  let picked = targets.targetInfos?.find((t) => t.type === "page" && t.attached && t.url === current);
+  if (!picked) {
+    picked = targets.targetInfos?.find((t) => t.type === "page" && t.attached);
+  }
+  if (!picked) {
+    await session.detach().catch(() => undefined);
+    throw new Error("Could not find a page target for this window (CDP).");
+  }
+
+  const { windowId } = (await session.send("Browser.getWindowForTarget", {
+    targetId: picked.targetId,
+  })) as { windowId: number };
+
+  try {
+    await session.send("Browser.setWindowBounds", {
+      windowId,
+      bounds: {
+        windowState: "normal",
+        left: 80,
+        top: 80,
+        width: 1280,
+        height: 900,
+      },
+    });
+  } finally {
+    await session.detach().catch(() => undefined);
+  }
+}
+
 export type HideBrowserResult = { usedWin32: boolean; usedCdpOffScreen: boolean };
 
 /**
@@ -77,8 +112,17 @@ export async function hideBrowserWindow(page: Page, profileDir?: string): Promis
   return { usedWin32: false, usedCdpOffScreen: true };
 }
 
-/** Restore window after Win32 hide. CDP off-screen fallback is not fully reversible here. */
+/** Restore visibility and move the window into view (Win32 show + CDP bounds onto the desktop). */
 export async function showBrowserWindow(page: Page, profileDir?: string): Promise<boolean> {
+  let cdpOk = false;
+  try {
+    await restoreBrowserWindowOnScreen(page);
+    cdpOk = true;
+  } catch (e) {
+    if (windowDebugEnabled()) {
+      console.error("[mira/show] CDP on-screen bounds:", e instanceof Error ? e.message : String(e));
+    }
+  }
   if (isWin32() && (await showBrowserWindowWin32(page, profileDir))) return true;
-  return false;
+  return cdpOk;
 }
