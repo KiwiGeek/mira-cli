@@ -1,0 +1,27 @@
+{
+  "name": "chatgpt-repl",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "chatgpt-repl": "./dist/cli.js",
+    "mira": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/cli.js",
+    "repl": "node dist/cli.js",
+    "mira": "node dist/cli.js",
+    "login": "node dist/cli.js login"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}
