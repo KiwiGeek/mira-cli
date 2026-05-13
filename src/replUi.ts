@@ -375,10 +375,13 @@ export const ui = {
     console.log(ui.dim("\n  Later. Thanks for the bandwidth.\n"));
   },
 
-  resumeCommand: (cmd: string): void => {
+  resumeCommand: (npmChatUrlCmd: string, opts?: { resumeCli?: string }): void => {
     ui.line();
     console.log(`  ${ui.bold("Archived")}${ui.dim(". To pick this thread back up:")}`);
-    console.log(`  ${ui.gray(cmd)}`);
+    console.log(`  ${ui.gray(npmChatUrlCmd)}`);
+    if (opts?.resumeCli) {
+      console.log(`  ${ui.dim("Or resume by id:")} ${ui.gray(opts.resumeCli)}`);
+    }
     console.log();
   },
 };

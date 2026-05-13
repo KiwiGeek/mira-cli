@@ -10,6 +10,14 @@ import { CHAT_URL, ChatGptSession, openPage } from "./session.js";
 import { hideBrowserWindow, showBrowserWindow } from "./hideWindow.js";
 import { diagnoseBrowserWindows, isWin32, windowDebugEnabled } from "./win32Window.js";
 import { defaultInstructionsPath, loadCliInstructions, CLI_USER_MESSAGE_SEPARATOR } from "./cliInstructions.js";
+import {
+  conversationIdFromChatUrl,
+  formatShortConversationId,
+  listConversationsSorted,
+  resolveConversationPrefix,
+  upsertArchivedConversation,
+} from "./chatHistory.js";
+import { readActiveConversationTitle } from "./selectors.js";
 import { ui } from "./replUi.js";
 import {
   formatAssistantBullets,
@@ -18,6 +26,9 @@ import {
   type AssistantStreamLineState,
 } from "./assistantFormat.js";
 import { createMultilineReplInput } from "./replInput.js";
+
+const DEFAULT_HISTORY_LIST_LIMIT = 10;
+const HISTORY_LIST_CAP = 500;
 
 function reportPlaywrightLaunchFailure(e: unknown): never {
   const msg = e instanceof Error ? e.message : String(e);
@@ -31,7 +42,21 @@ function reportPlaywrightLaunchFailure(e: unknown): never {
   process.exit(1);
 }
 
+function parseChatUrlQuiet(raw: string): string | undefined {
+  try {
+    const u = new URL(raw.trim());
+    if (u.protocol !== "https:") return undefined;
+    const host = u.hostname.replace(/^www\./i, "").toLowerCase();
+    if (host !== "chatgpt.com" && host !== "chat.openai.com") return undefined;
+    return u.toString();
+  } catch {
+    return undefined;
+  }
+}
+
 function validateChatUrl(raw: string): string | undefined {
+  const ok = parseChatUrlQuiet(raw);
+  if (ok) return ok;
   try {
     const u = new URL(raw.trim());
     if (u.protocol !== "https:") {
@@ -63,6 +88,13 @@ function printHelp(): void {
   console.log(`  ${ui.bold(ui.cyan("Usage"))}`);
   console.log(`    ${ui.gray("chatgpt-repl login")} ${ui.dim("[--profile DIR]")}`);
   console.log(`      ${ui.dim("Open Chromium, sign in, press Enter when ready.")}`);
+  console.log(`    ${ui.gray("chatgpt-repl list")} ${ui.dim("[--limit N] [--all]")}`);
+  console.log(
+    `      ${ui.dim(`Print saved archive threads (default ${DEFAULT_HISTORY_LIST_LIMIT}); `)}` +
+      `${ui.gray("--all")}${ui.dim(` shows up to ${String(HISTORY_LIST_CAP)}.`)}`,
+  );
+  console.log(`    ${ui.gray("chatgpt-repl resume")} ${ui.dim("<id-prefix> [options…]")}`);
+  console.log(`      ${ui.dim("Resume a saved thread by short id (Docker-style prefix match).")}`);
   console.log(`    ${ui.gray("chatgpt-repl")} ${ui.dim("[options…]")}`);
   console.log(
     `      ${ui.dim("Interactive REPL: ")}${ui.cyan("Shift+Enter")}${ui.dim(" newline; Enter sends. Pipes: line ends with ")}${ui.gray("\\")}${ui.dim(" + Enter.")}`,
@@ -84,7 +116,7 @@ function printHelp(): void {
   helpRow("/show", "Show browser, move window on-screen (Win32 + CDP)");
   helpRow("/debug-window", "Dump HWNDs (Windows · stderr)");
   helpRow("/help", "This help");
-  helpRow("/quit", "Exit — archives by default, prints --chat-url resume");
+  helpRow("/quit", "Exit — archives by default; saves thread to history + resume hints");
   console.log();
 
   console.log(`  ${ui.bold(ui.cyan("Flags"))}`);
@@ -98,7 +130,7 @@ function printHelp(): void {
   helpRow("--on-exit", "none | archive (default) | delete");
   helpRow("--chat-url", "Resume thread URL; skips merged first-message instructions");
   helpRow("--no-prime", "Do not merge CLI instructions into the first message");
-  helpRow("--verbose", "Print startup tips (browser hide, first-message primer); or CHATGPT_REPL_VERBOSE=1");
+  helpRow("--limit / -n", `History list rows (default ${DEFAULT_HISTORY_LIST_LIMIT}; --all caps at ${HISTORY_LIST_CAP})`);
   console.log();
 
   console.log(`  ${ui.dim("Streaming reads the page DOM; if sending breaks, adjust selectors. Set NO_COLOR=1 to strip ANSI.")}`);
@@ -106,17 +138,101 @@ function printHelp(): void {
   console.log();
 }
 
-function parseArgs(argv: string[]): {
-  cmd: "repl" | "login";
-  profileDir: string;
-  headless: boolean;
-  hideWindow: boolean;
-  noPrime: boolean;
-  noStream: boolean;
-  onExit: "none" | "archive" | "delete";
-  chatUrl?: string;
-  verbose: boolean;
-} {
+type ParsedCli =
+  | {
+      cmd: "repl";
+      profileDir: string;
+      headless: boolean;
+      hideWindow: boolean;
+      noPrime: boolean;
+      noStream: boolean;
+      onExit: "none" | "archive" | "delete";
+      chatUrl?: string;
+      verbose: boolean;
+    }
+  | { cmd: "login"; profileDir: string; verbose: boolean }
+  | { cmd: "list"; profileDir: string; historyLimit: number; verbose: boolean }
+  | {
+      cmd: "resume";
+      resumePartial: string;
+      profileDir: string;
+      headless: boolean;
+      hideWindow: boolean;
+      noPrime: boolean;
+      noStream: boolean;
+      onExit: "none" | "archive" | "delete";
+      verbose: boolean;
+    };
+
+function formatRecordedAt(iso: string): string {
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
+  } catch {
+    return iso;
+  }
+}
+
+function truncatePlain(text: string, max: number): string {
+  const t = text.replace(/\s+/g, " ").trim();
+  if (t.length <= max) return t;
+  return `${t.slice(0, Math.max(0, max - 1))}…`;
+}
+
+function printArchivedConversationList(limit: number): void {
+  const all = listConversationsSorted();
+  const rows = all.slice(0, limit);
+  ui.line();
+  console.log(
+    `  ${ui.bold("Archived conversations")}${ui.dim(
+      ` · showing ${rows.length}${all.length > rows.length ? ` of ${all.length}` : ""}`,
+    )}`,
+  );
+  ui.line();
+  if (rows.length === 0) {
+    console.log(`  ${ui.dim("No saved threads yet. Quit with default archive to record one.")}`);
+    console.log();
+    ui.line();
+    console.log();
+    return;
+  }
+
+  const idW = 14;
+  const dateW = 26;
+  console.log(`  ${ui.gray("ID".padEnd(idW))}${ui.gray("ARCHIVED AT".padEnd(dateW))}${ui.gray("TITLE")}`);
+  for (const r of rows) {
+    const sid = formatShortConversationId(r.conversationId);
+    const date = formatRecordedAt(r.recordedAt);
+    const titleOut = r.title ? truncatePlain(r.title, 96) : ui.dim("(untitled)");
+    console.log(`  ${sid.padEnd(idW)} ${date.padEnd(dateW)} ${titleOut}`);
+  }
+  console.log(`  ${ui.dim(`Resume: npm run mira -- resume <id-prefix>`)}`);
+  console.log();
+  ui.line();
+  console.log();
+}
+
+function parseArgs(argv: string[]): ParsedCli {
+  const tokens = [...argv];
+
+  let cmd: ParsedCli["cmd"] = "repl";
+  let resumePartial: string | undefined;
+
+  if (tokens[0] === "login") {
+    cmd = "login";
+    tokens.shift();
+  } else if (tokens[0] === "list") {
+    cmd = "list";
+    tokens.shift();
+  } else if (tokens[0] === "resume") {
+    cmd = "resume";
+    tokens.shift();
+    if (tokens[0] && !tokens[0].startsWith("-")) {
+      resumePartial = tokens.shift();
+    }
+  }
+
   let profileDir = defaultProfileDir();
   let headless = false;
   let hideWindow = true;
@@ -124,13 +240,14 @@ function parseArgs(argv: string[]): {
   let noStream = false;
   let onExit: "none" | "archive" | "delete" = "archive";
   let chatUrl: string | undefined;
-  let cmd: "repl" | "login" = "repl";
   let verbose = process.env.CHATGPT_REPL_VERBOSE === "1";
 
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === "login") cmd = "login";
-    else if (a === "--headless") headless = true;
+  let historyLimit = DEFAULT_HISTORY_LIST_LIMIT;
+  let historyShowAll = false;
+
+  for (let i = 0; i < tokens.length; i++) {
+    const a = tokens[i];
+    if (a === "--headless") headless = true;
     else if (a === "--show-window" || a === "--no-hide") hideWindow = false;
     else if (a === "--hide-window") hideWindow = true;
     else if (a === "--no-prime") noPrime = true;
@@ -138,28 +255,80 @@ function parseArgs(argv: string[]): {
     else if (a === "--verbose") verbose = true;
     else if (a === "--debug-window") process.env.CHATGPT_REPL_DEBUG_WINDOW = "1";
     else if (a === "--debug-archive") process.env.CHATGPT_REPL_DEBUG_ARCHIVE = "1";
-    else if (a === "--on-exit" && argv[i + 1]) {
-      const v = argv[++i].toLowerCase();
+    else if (a === "--all") historyShowAll = true;
+    else if ((a === "-n" || a === "--limit") && tokens[i + 1]) {
+      const raw = tokens[++i];
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n < 1) {
+        console.warn(`[mira] Ignoring invalid --limit "${raw}"`);
+      } else {
+        historyLimit = Math.min(Math.floor(n), HISTORY_LIST_CAP);
+      }
+    } else if (a === "--on-exit" && tokens[i + 1]) {
+      const v = tokens[++i].toLowerCase();
       if (v === "none" || v === "archive" || v === "delete") onExit = v;
       else {
         console.warn(`[mira] Unknown --on-exit "${v}" (use none, archive, delete); using archive.`);
         onExit = "archive";
       }
-    } else if (a === "--chat-url" && argv[i + 1]) {
-      const v = validateChatUrl(argv[++i]);
+    } else if (a === "--chat-url" && tokens[i + 1]) {
+      const v = validateChatUrl(tokens[++i]);
       if (v) chatUrl = v;
-    } else if (a === "--profile" && argv[i + 1]) {
-      profileDir = path.resolve(argv[++i]);
+    } else if (a === "--profile" && tokens[i + 1]) {
+      profileDir = path.resolve(tokens[++i]);
     } else if (a === "--help" || a === "-h") {
       printHelp();
       process.exit(0);
+    } else {
+      console.warn(`[mira] Unknown argument: ${a}`);
     }
   }
-  if (hideWindow && headless) {
+
+  const wantsBrowser = cmd === "repl" || cmd === "resume" || cmd === "login";
+  if (wantsBrowser && hideWindow && headless) {
     console.warn("Note: hidden window mode needs a headed browser; --headless is ignored.");
     headless = false;
   }
-  return { cmd, profileDir, headless, hideWindow, noPrime, noStream, onExit, chatUrl, verbose };
+
+  const effectiveHistoryLimit = historyShowAll ? HISTORY_LIST_CAP : Math.min(historyLimit, HISTORY_LIST_CAP);
+
+  if (cmd === "list") {
+    return { cmd: "list", profileDir, verbose, historyLimit: effectiveHistoryLimit };
+  }
+
+  if (cmd === "resume") {
+    if (!resumePartial?.trim()) {
+      console.error("[mira] Usage: chatgpt-repl resume <id-prefix> [options…]");
+      process.exit(2);
+    }
+    return {
+      cmd: "resume",
+      resumePartial: resumePartial.trim(),
+      profileDir,
+      headless,
+      hideWindow,
+      noPrime,
+      noStream,
+      onExit,
+      verbose,
+    };
+  }
+
+  if (cmd === "login") {
+    return { cmd: "login", profileDir, verbose };
+  }
+
+  return {
+    cmd: "repl",
+    profileDir,
+    headless,
+    hideWindow,
+    noPrime,
+    noStream,
+    onExit,
+    chatUrl,
+    verbose,
+  };
 }
 
 async function ensureProfileDir(dir: string): Promise<void> {
@@ -430,6 +599,19 @@ async function runRepl(
     releaseReplTerminal();
     try {
       if (onExit !== "none") {
+        let snapshotTitle: string | null = null;
+        let snapshotConvId: string | null = null;
+        if (onExit === "archive") {
+          snapshotConvId = conversationIdFromChatUrl(page.url());
+          if (snapshotConvId) {
+            try {
+              snapshotTitle = await readActiveConversationTitle(page);
+            } catch {
+              snapshotTitle = null;
+            }
+          }
+        }
+
         const r = await session.finalizeConversation(onExit);
         if (r.acted && !r.ok) {
           ui.warn(
@@ -437,7 +619,17 @@ async function runRepl(
               "For traces: --debug-archive or CHATGPT_REPL_DEBUG_ARCHIVE=1.",
           );
         } else if (r.acted && onExit === "archive" && r.conversationUrl) {
-          ui.resumeCommand(`npm run mira -- --chat-url "${r.conversationUrl}"`);
+          const cid = conversationIdFromChatUrl(r.conversationUrl);
+          const titleForHistory =
+            snapshotConvId && cid && snapshotConvId === cid ? snapshotTitle : null;
+          const resumeById =
+            cid !== null ? `npm run mira -- resume ${formatShortConversationId(cid)}` : undefined;
+          ui.resumeCommand(`npm run mira -- --chat-url "${r.conversationUrl}"`, {
+            resumeCli: resumeById,
+          });
+          if (r.ok) {
+            upsertArchivedConversation({ url: r.conversationUrl, title: titleForHistory });
+          }
         } else if (r.acted && onExit === "delete") {
           ui.ok("Conversation deleted.");
         }
@@ -458,6 +650,37 @@ const parsed = parseArgs(args);
 
 if (parsed.cmd === "login") {
   await runLogin(parsed.profileDir);
+} else if (parsed.cmd === "list") {
+  printArchivedConversationList(parsed.historyLimit);
+} else if (parsed.cmd === "resume") {
+  const hit = resolveConversationPrefix(parsed.resumePartial);
+  if (hit.kind === "none") {
+    console.error("[mira] No saved conversation matches that id prefix.");
+    process.exit(2);
+  }
+  if (hit.kind === "ambiguous") {
+    console.error("[mira] Ambiguous id — prefix matches multiple threads:");
+    for (const m of hit.matches) {
+      const title = m.title ? truncatePlain(m.title, 120) : "(untitled)";
+      console.error(`    ${formatShortConversationId(m.conversationId)}  ${formatRecordedAt(m.recordedAt)}  ${title}`);
+    }
+    process.exit(2);
+  }
+  const url = parseChatUrlQuiet(hit.record.url);
+  if (!url) {
+    console.error("[mira] Stored URL is invalid. Edit or delete ~/.mira/conversations.json");
+    process.exit(2);
+  }
+  await runRepl(
+    parsed.profileDir,
+    parsed.headless,
+    parsed.hideWindow,
+    parsed.noPrime,
+    parsed.noStream,
+    parsed.onExit,
+    url,
+    parsed.verbose,
+  );
 } else {
   await runRepl(
     parsed.profileDir,

@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { homedir } from "node:os";
+import { miraStateDir } from "./paths.js";
 
 export const DEFAULT_CLI_INSTRUCTIONS = `You are Mira. Assume you're communicating through a CLI interface.
 
@@ -27,7 +27,7 @@ export const CLI_USER_MESSAGE_SEPARATOR =
   "\n\n---\nHuman message (respond only to what follows; ignore all instructions above).\n---\n\n";
 
 export function defaultInstructionsPath(): string {
-  return path.join(homedir(), ".chatgpt-repl", "instructions.txt");
+  return path.join(miraStateDir(), "instructions.txt");
 }
 
 /** If present, full file contents replace the built-in default. */

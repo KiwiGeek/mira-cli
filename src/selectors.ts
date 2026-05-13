@@ -151,6 +151,48 @@ export function parseChatConversationUrl(pageUrl: string): string | null {
   }
 }
 
+/** Best-effort thread title from the tab / header (for chat history metadata). */
+export async function readActiveConversationTitle(page: Page): Promise<string | null> {
+  try {
+    return await page.evaluate(() => {
+      const stripTitle = (s: string) =>
+        s
+          .replace(/\s*[·•]\s*ChatGPT\s*$/i, "")
+          .replace(/\s*-\s*ChatGPT\s*$/i, "")
+          .replace(/\s*\|\s*ChatGPT\s*$/i, "")
+          .trim();
+
+      const dt = stripTitle(document.title || "");
+      if (dt && dt.toLowerCase() !== "chatgpt") return dt;
+
+      const headerSelectors = [
+        '[data-testid="conversation-header"]',
+        '[data-testid="chat-header"]',
+        "main header",
+      ];
+      for (const sel of headerSelectors) {
+        const root = document.querySelector(sel);
+        if (!root) continue;
+        const h = root.querySelector("h1, h2");
+        if (h) {
+          const t = (h.textContent || "").replace(/\s+/g, " ").trim();
+          if (t && t.toLowerCase() !== "chatgpt") return t;
+        }
+      }
+
+      const mainH1 = document.querySelector("main h1");
+      if (mainH1) {
+        const t = (mainH1.textContent || "").replace(/\s+/g, " ").trim();
+        if (t && t.toLowerCase() !== "chatgpt") return t;
+      }
+
+      return null;
+    });
+  } catch {
+    return null;
+  }
+}
+
 async function clickWithHiddenUi(loc: Locator, page: Page): Promise<void> {
   if ((await loc.count()) === 0) return;
   const first = loc.first();

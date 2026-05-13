@@ -91,7 +91,7 @@ Examples: `/help`, `/new`, `/name My chat title`, `/show`, `/quit`. On **`/quit`
 
 ## Custom instructions
 
-Optional file (path is shown on first run / `--help`): `%USERPROFILE%\.chatgpt-repl\instructions.txt` on Windows, or `$HOME/.chatgpt-repl/instructions.txt` elsewhere. If present, it replaces the built-in Mira preamble.
+Optional file (path is shown on first run / `--help`): `%USERPROFILE%\.mira\instructions.txt` on Windows, or `$HOME/.mira/instructions.txt` elsewhere. If present, it replaces the built-in Mira preamble.
 
 ## Development notes
 
