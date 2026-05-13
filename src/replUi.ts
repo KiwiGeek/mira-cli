@@ -172,7 +172,7 @@ export const ui = {
       `  ${ui.dim("Piped / non-TTY: end a line with ")}${ui.gray("\\")}${ui.dim(" + Enter to continue.")}`,
     );
     console.log(
-      `  ${ui.dim("Wait for Mira’s reply before the next message; ")}${ui.gray("/commands")}${ui.dim(" work between turns.")}`,
+      `  ${ui.dim("Wait for Mira’s reply before the next message; lines starting with ")}${ui.gray("/")}${ui.dim(" stay local—see ")}${ui.gray("/help")}${ui.dim(".")}`,
     );
     console.log();
   },

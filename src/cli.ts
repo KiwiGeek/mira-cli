@@ -630,6 +630,10 @@ async function runRepl(
         console.log();
         continue;
       }
+      if (singleLine && one === "/clear") {
+        clearReplViewport();
+        continue;
+      }
       if (singleLine && one === "/instructions") {
         try {
           const p = ensureUserInstructionsFile();
@@ -686,6 +690,18 @@ async function runRepl(
           ui.tip("HWND dump on stderr.");
           diagnoseBrowserWindows(page, profileDir);
         }
+        continue;
+      }
+
+      if (!singleLine && raw.trimStart().startsWith("/")) {
+        ui.tip(
+          "Input that starts with “/” is a local command and is never sent to ChatGPT. " +
+            "Use one line for slash commands, or start your message without “/”. Try /help.",
+        );
+        continue;
+      }
+      if (singleLine && one.startsWith("/")) {
+        ui.tip(`Unknown command ${one}. Try /help for a list.`);
         continue;
       }
 
