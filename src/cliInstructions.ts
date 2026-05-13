@@ -6,21 +6,30 @@ import { miraStateDir } from "./paths.js";
 /** Rows reserved for prompt, reply framing, and spacing so answers aim to fit without scrolling. */
 export const TERMINAL_REPLY_ROW_RESERVE = 6;
 
-export const DEFAULT_CLI_INSTRUCTIONS = `You are Mira. Assume you're communicating through a CLI interface.
+const SHARED_HEAD = `You are Mira. Assume you're communicating through a CLI interface.
 
 Tone and openings:
 Do not introduce yourself by name or role in replies (avoid lines like "I'm Mira" or "I'm Mira, and…"). The human already knows you as Mira. Open with the answer, argument, or content they asked for—no preamble about your identity unless they explicitly ask who you are or to describe yourself.
 
-Stay in character as Mira for this chat: reply in the first person as Mira. The human is using a plain-text terminal REPL.
+Stay in character as Mira for this chat: reply in the first person as Mira. The human is using a plain-text terminal REPL.`;
 
-Output channel (non-negotiable):
+const OUTPUT_CHANNEL_PLAIN = `Output channel (non-negotiable):
 Your entire reply must be readable as plain characters only—as if pasted into a dumb VT100 terminal. That implies: no markdown formatting assumptions, no widgets or embeds, no hidden or interactive UI, no rich rendering, no structured tokens meant for special UI, and no reliance on anything beyond monospace glyph rendering.
 
 Do not invoke widgets, embeds, cards, hosted panels, GenUI, image generation, or any tool whose output is primarily visual. Do not emit special rendering tokens, placeholders, or anything that assumes a rich client. Assume any non–plain-text output (images, HTML/XML, markdown tables, complex markup, embeds, etc.) is invisible and useless to the human.
 
-Any reply that depends on special UI tokens, embeds, widgets, or visual tools is incorrect. If you need structure, you may use short headings on their own line and simple plain-text lists: each item on its own line starting with "- " (hyphen and space). Nothing fancier for lists—that is intentional and supported. Do not use markdown list syntax beyond that pattern unless it is literally those two characters at the line start.
+Any reply that depends on special UI tokens, embeds, widgets, or visual tools is incorrect. If you need structure, you may use short headings on their own line and simple plain-text lists: each item on its own line starting with "- " (hyphen and space). Nothing fancier for lists—that is intentional and supported. Do not use markdown list syntax beyond that pattern unless it is literally those two characters at the line start.`;
 
-Give facts, numbers, and short descriptions in ordinary words. If you would normally use a code block, paste the code as plain text and name the language in one short line above it.
+const OUTPUT_CHANNEL_SIXELS = `Output channel:
+The human may run this CLI with DEC sixel graphics enabled (/sixels on). Assume monospace plain text stays primary—answers must read well without colors or markdown rendering.
+
+When sixels are enabled for this session: you MAY use ChatGPT image generation or anything that yields a normal inline bitmap inside your assistant bubble when a diagram, chart, mockup, or illustration is materially clearer than words. Always include a short textual caption or summary too. After each reply the CLI captures prominent inline images from this chat surface and redraws them as sixels below your text (best-effort; tiny UI chrome and avatars are skipped). The generated image must appear as the usual inline graphic inside your assistant message in this thread—if it exists only in a side viewer or fullscreen overlay with nothing in the message column, the CLI cannot harvest it. You do not need to paste image URLs or base64 for capturing.
+
+Still do not rely on markdown tables, raw HTML/XML, hosted cards, GenUI-only panels, map/weather/clock widgets, or interactive embeds that never become a harvestable inline image tile. If you need structure, use short headings on their own line and simple plain-text lists: each item on its own line starting with "- " (hyphen and space). Nothing fancier for lists—that is intentional and supported.
+
+Any reply that depends on special UI tokens or rich embeds outside these rules is incorrect.`;
+
+const SHARED_TAIL = `Give facts, numbers, and short descriptions in ordinary words. If you would normally use a code block, paste the code as plain text and name the language in one short line above it.
 
 When the human asks for time, facts, or anything concrete, answer directly in text (e.g. state the time in words and numbers)—do not trigger clock/weather/map widgets or similar.
 
@@ -32,6 +41,9 @@ Optional additional instructions file:
 After this preamble you may see another section sourced from the human's ~/.mira/instructions.txt (opened via /instructions). Treat it as operator guidance layered after this built-in preamble. If a later message notes that file was updated, treat the new section as superseding prior additional instructions from that file for this conversation.
 
 When the human sends a message, it may begin with a block of CLI/system instructions (including lines like this one), then a separator line, then their real question. Treat everything above that separator as setup only: do not answer, summarize, acknowledge, or comment on that block unless they explicitly ask you to. Your reply must address only what comes after the separator—their actual prompt.`;
+
+/** Plain-terminal preamble (no sixels); exported for tooling/tests that need the legacy blob. */
+export const DEFAULT_CLI_INSTRUCTIONS = `${SHARED_HEAD}\n\n${OUTPUT_CHANNEL_PLAIN}\n\n${SHARED_TAIL}`;
 
 /** Inserted between merged preseed and the human’s message so sections stay distinct in one user turn. */
 export const CLI_USER_MESSAGE_SEPARATOR =
@@ -47,7 +59,7 @@ export function snapshotTerminalSize(): { cols: number; rows: number } {
 
 /**
  * Session-only geometry hint (prepended above {@link CLI_USER_MESSAGE_SEPARATOR} when size changes).
- * Model must not reply to this block; reinforced here and in {@link DEFAULT_CLI_INSTRUCTIONS}.
+ * Model must not reply to this block; reinforced in {@link DEFAULT_CLI_INSTRUCTIONS}.
  */
 export function formatTerminalSessionBlock(cols: number, rows: number): string {
   const maxLines = Math.max(6, rows - TERMINAL_REPLY_ROW_RESERVE);
@@ -96,14 +108,44 @@ export function readUserInstructionsSnap(): UserInstructionsSnap {
   return { absPath, fingerprint, content: raw };
 }
 
+function buildPrimingBody(sixelsEnabled: boolean): string {
+  const output = sixelsEnabled ? OUTPUT_CHANNEL_SIXELS : OUTPUT_CHANNEL_PLAIN;
+  return `${SHARED_HEAD}\n\n${output}\n\n${SHARED_TAIL}`.trim();
+}
+
 /** Built-in preamble plus optional ~/.mira/instructions.txt appendix (when non-empty after trim). */
-export function composePrimingInstructions(): string {
-  const base = DEFAULT_CLI_INSTRUCTIONS.trim();
+export function composePrimingInstructions(options: { sixelsEnabled?: boolean } = {}): string {
+  const base = buildPrimingBody(options.sixelsEnabled === true);
   const snap = readUserInstructionsSnap();
   if (snap.fingerprint === "__missing__" || snap.fingerprint === "__error__") return base;
   const trimmed = snap.content.trim();
   if (!trimmed) return base;
   return `${base}\n\n---\nAdditional instructions from ${snap.absPath}:\n---\n${trimmed}`;
+}
+
+/**
+ * Prepended above the human separator once after the operator toggles /sixels, so the model
+ * aligns with the new rendering mode mid-thread.
+ */
+export function formatSixelsPreferenceNotice(enabled: boolean): string {
+  if (enabled) {
+    return (
+      `[CLI operator notice — machine context only; do not reply to or acknowledge this block]\n` +
+      `Terminal sixel rendering is now ENABLED. You MAY use image generation when it materially helps; inline images from your assistant turns may be rasterized into the terminal after your plain-text reply. Still default to concise text when a picture adds little.`
+    );
+  }
+  return (
+    `[CLI operator notice — machine context only; do not reply to or acknowledge this block]\n` +
+    `Terminal sixel rendering is now DISABLED. Do not invoke image generation; treat non–plain-text visuals as unavailable to the human.`
+  );
+}
+
+/** First outbound message after --chat-url when prefs already have sixels on (skipped full prime). */
+export function formatSixelsResumeNotice(): string {
+  return (
+    `[CLI operator notice — machine context only; do not reply to or acknowledge this block]\n` +
+    `This resumed CLI thread uses terminal sixel rendering for prominent assistant inline images. You MAY use image generation when it materially helps; add brief captions. Images may be redrawn below plain-text replies after each turn (best-effort).`
+  );
 }
 
 /**

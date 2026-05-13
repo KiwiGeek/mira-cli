@@ -19,10 +19,12 @@
     "node": ">=20"
   },
   "dependencies": {
-    "playwright": "^1.49.0"
+    "playwright": "^1.49.0",
+    "pngjs": "^7.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@types/pngjs": "^6.0.5",
     "typescript": "^5.7.0"
   }
 }

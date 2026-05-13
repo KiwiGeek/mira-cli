@@ -1,4 +1,5 @@
 import type { Locator, Page } from "playwright";
+import { composerAttachPollMs } from "./replTimeouts.js";
 
 /** Set `CHATGPT_REPL_DEBUG_ARCHIVE=1` or pass `--debug-archive` for stderr traces during --on-exit. */
 export function archiveDebugEnabled(): boolean {
@@ -57,7 +58,7 @@ export async function waitForComposerMount(page: Page, timeoutMs: number): Promi
       for (const loc of strategies) {
         if ((await loc.count()) === 0) continue;
         try {
-          await loc.waitFor({ state: "attached", timeout: 2_500 });
+          await loc.waitFor({ state: "attached", timeout: composerAttachPollMs() });
         } catch (e) {
           lastErr = e;
           continue;
@@ -110,14 +111,43 @@ export async function findPromptBox(page: Page): Promise<Locator> {
   );
 }
 
+export async function scrollConversationIntoView(page: Page): Promise<void> {
+  await page
+    .evaluate(() => {
+      const candidates = [
+        "main",
+        '[data-testid="conversation-turns"]',
+        '[class*="react-scroll-to-bottom"]',
+      ];
+      for (const sel of candidates) {
+        const el = document.querySelector(sel);
+        if (el instanceof HTMLElement) el.scrollTop = el.scrollHeight;
+      }
+      const se = document.scrollingElement;
+      if (se) se.scrollTop = se.scrollHeight;
+    })
+    .catch(() => undefined);
+  await page.keyboard.press("End").catch(() => undefined);
+}
+
+/**
+ * Nodes representing the assistant side of a turn (best-effort — ChatGPT virtualizes / mutates DOM).
+ * Fallback matches conversation-turn wrappers that carry generated media even when inner role attrs disappear briefly.
+ */
 export function assistantMessageLocator(page: Page): Locator {
-  return page.locator(
-    [
-      '[data-message-author-role="assistant"]',
-      '[data-testid="conversation-turn-assistant"]',
-      'div[data-role="assistant"]',
-    ].join(", "),
-  );
+  const inner = [
+    '[data-message-author-role="assistant"]',
+    '[data-message-author="assistant"]',
+    '[data-testid="conversation-turn-assistant"]',
+    'div[data-role="assistant"]',
+  ].join(", ");
+
+  const fallback = page.locator('[data-testid^="conversation-turn-"]').filter({
+    hasNot: page.locator('[data-message-author-role="user"]'),
+    has: page.locator("img, canvas"),
+  });
+
+  return page.locator(inner).or(fallback);
 }
 
 export async function clickNewChat(page: Page): Promise<void> {

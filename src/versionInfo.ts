@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { defaultInstructionsPath } from "./cliInstructions.js";
-import { miraStateDir, packageRoot } from "./paths.js";
+import { miraStateDir, packageRoot, preferencesPath } from "./paths.js";
 
 function gitStdout(root: string, args: string[]): string | null {
   const r = spawnSync("git", args, {
@@ -62,6 +62,7 @@ export function formatWhoamiLines(activeBrowserProfileDir: string): string[] {
   lines.push(`browser profile ${activeBrowserProfileDir}`);
   lines.push(`state dir ${miraStateDir()}`);
   lines.push(`instructions ${defaultInstructionsPath()}`);
+  lines.push(`preferences ${preferencesPath()}`);
   const sh = gitStdout(pkg, ["rev-parse", "--short", "HEAD"]);
   if (sh) lines.push(`HEAD ${sh}`);
   return lines;

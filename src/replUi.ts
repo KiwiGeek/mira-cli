@@ -156,7 +156,7 @@ export const ui = {
   },
 
   /** One-time header after the session is ready. */
-  banner: (opts: { resumedChat?: boolean }): void => {
+  banner: (opts: { resumedChat?: boolean; sixelsEnabled?: boolean }): void => {
     ui.line();
     const right = opts.resumedChat ? "Resumed chat" : "New session";
     console.log(`  ${ui.bold("Mira")}  ${ui.gray("·")}  terminal REPL for ChatGPT  ${ui.dim(right)}`);
@@ -168,6 +168,11 @@ export const ui = {
     console.log(
       `  ${ui.gray("/help")}${ui.dim("  ·  ")}${ui.gray("Shift+Enter")}${ui.dim(" newline  ·  ")}${ui.gray("/quit")}${ui.dim(" exit (archives by default)")}`,
     );
+    if (opts.sixelsEnabled) {
+      console.log(
+        `  ${ui.dim("Sixel capture:")} ${ui.gray("/sixels off")}${ui.dim(" to disable inline images → terminal.")}`,
+      );
+    }
     console.log(
       `  ${ui.dim("Piped / non-TTY: end a line with ")}${ui.gray("\\")}${ui.dim(" + Enter to continue.")}`,
     );

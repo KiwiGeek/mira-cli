@@ -1,4 +1,16 @@
 import type { BrowserContext, Page } from "playwright";
+import { waitForAssistantTurnImagesReady } from "./assistantImages.js";
+import { replDebug, replDebugEnabled } from "./replDebug.js";
+import {
+  assistantDomResyncMs,
+  assistantImageReadyMs,
+  composerReadyMs,
+  finalizeImageReadyMs,
+  replyTailSettleMs,
+  responseTimeoutMs,
+  stopButtonAppearTimeoutMs,
+} from "./replTimeouts.js";
+import { assistantBubbleShowsImagePlaceholder } from "./assistantPlaceholder.js";
 import {
   archiveOrDeleteActiveConversation,
   assistantMessageLocator,
@@ -6,12 +18,11 @@ import {
   findPromptBox,
   parseChatConversationUrl,
   renameActiveConversation,
+  scrollConversationIntoView,
   waitForComposerMount,
 } from "./selectors.js";
 
 export const CHAT_URL = "https://chatgpt.com/";
-
-const COMPOSER_READY_MS = 120_000;
 
 async function submitMessage(page: Page): Promise<void> {
   const sendCandidates = [
@@ -38,7 +49,7 @@ async function lastAssistantText(page: Page): Promise<string> {
   const n = await loc.count();
   if (n === 0) return "";
   return (
-    await loc.nth(n - 1).evaluate((el: HTMLElement) => {
+    await loc.last().evaluate((el: HTMLElement) => {
       const norm = (t: string) => t.replace(/\r\n/g, "\n").trimEnd();
       if (!el.querySelector("li")) {
         return norm(el.innerText);
@@ -89,10 +100,65 @@ async function lastAssistantText(page: Page): Promise<string> {
   ).trimEnd();
 }
 
+/**
+ * Detect **any** change in the latest assistant turn — including image-only replies (empty text).
+ * Previously we only compared `lastAssistantText`, which stays `""` for image-only bubbles and matched
+ * `before === ""`, so the wait loop never exited.
+ */
+async function latestAssistantTurnSignature(page: Page): Promise<string> {
+  const loc = assistantMessageLocator(page);
+  const n = await loc.count();
+  if (n === 0) return JSON.stringify({ t: "", i: "", h: -1 });
+
+  const turn = loc.last();
+  const text = await lastAssistantText(page);
+  const meta = await turn.evaluate((el: HTMLElement) => {
+    const imgs = Array.from(el.querySelectorAll("img")).map((node) => {
+      const im = node as HTMLImageElement;
+      const src = im.currentSrc || im.src || "";
+      const nw = im.naturalWidth || im.width || 0;
+      const nh = im.naturalHeight || im.height || 0;
+      const r = im.getBoundingClientRect();
+      return `${nw}x${nh}:${Math.round(r.width)}x${Math.round(r.height)}:${im.complete ? 1 : 0}:${src.length}:${src.slice(0, 80)}`;
+    });
+    const canvases = Array.from(el.querySelectorAll("canvas")).map((cv) => `${cv.width}x${cv.height}`);
+    return {
+      i: imgs.join("|"),
+      h: el.innerHTML.length,
+      c: canvases.join("|"),
+    };
+  });
+
+  return JSON.stringify({ t: text, i: meta.i, h: meta.h, c: meta.c });
+}
+
+/** Signature JSON uses `h:-1` when no `[data-message-author-role=assistant]` nodes match (DOM hole). */
+function isVacuumAssistantSig(sig: string): boolean {
+  try {
+    const o = JSON.parse(sig) as { h?: number };
+    return o.h === -1;
+  } catch {
+    return false;
+  }
+}
+
+/** ChatGPT sometimes temporarily removes assistant rows from the DOM; avoid `.last()` hangs (~30s each). */
+async function waitAssistantTurnPresent(page: Page, maxMs: number): Promise<boolean> {
+  const loc = assistantMessageLocator(page);
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    await scrollConversationIntoView(page);
+    const n = await loc.count();
+    if (n > 0) return true;
+    await page.waitForTimeout(120).catch(() => undefined);
+  }
+  return false;
+}
+
 async function waitForStopHidden(page: Page, timeoutMs: number): Promise<void> {
   const stop = page.getByRole("button", { name: /stop|stop generating/i }).first();
   try {
-    await stop.waitFor({ state: "visible", timeout: 25_000 });
+    await stop.waitFor({ state: "visible", timeout: stopButtonAppearTimeoutMs() });
   } catch {
     /* fast responses may never show Stop */
   }
@@ -105,52 +171,66 @@ export type AssistantStreamOptions = {
 };
 
 /**
- * After the main loop thinks the reply is stable, ChatGPT may still append text in short bursts.
- * Poll until the last assistant `innerText` is unchanged for several consecutive reads (capped by time).
+ * After the main loop thinks the reply is stable, ChatGPT may still append text or swap `<img>` payloads.
+ * Poll until assist signature matches across consecutive reads (capped by time).
  */
 async function finalizeAssistantReply(
   page: Page,
-  before: string,
-  lastKnown: string,
+  baselineSig: string,
+  lastKnownText: string,
+  lastKnownSig: string,
   pollMs: number,
   overallDeadline: number,
-  emit: (s: string) => void,
+  emitTextDelta: (s: string) => void,
 ): Promise<string> {
-  let cur = lastKnown;
+  const finalizeImgBudget = Math.min(finalizeImageReadyMs(), Math.max(0, overallDeadline - Date.now()));
+  if (finalizeImgBudget >= 500) await waitForAssistantTurnImagesReady(page, finalizeImgBudget);
+
+  let curText = lastKnownText;
+  let curSig = lastKnownSig;
   let identicalPolls = 0;
   const needIdentical = 5;
-  const tailBudget = 6_000;
+  const tailBudget = replyTailSettleMs();
   const tailUntil = Date.now() + tailBudget;
 
   while (Date.now() < overallDeadline && Date.now() < tailUntil) {
     await page.waitForTimeout(pollMs);
-    const next = await lastAssistantText(page);
-    if (!next || next === before) continue;
-    emit(next);
-    if (next === cur) {
+    const nextText = await lastAssistantText(page);
+    const nextSig = await latestAssistantTurnSignature(page);
+    if (isVacuumAssistantSig(nextSig)) continue;
+    emitTextDelta(nextText);
+    if (assistantBubbleShowsImagePlaceholder(nextText)) {
+      identicalPolls = 0;
+      continue;
+    }
+    if (nextSig === curSig) {
       identicalPolls++;
-      if (identicalPolls >= needIdentical) return cur;
+      if (identicalPolls >= needIdentical) return curText;
     } else {
-      cur = next;
+      curText = nextText;
+      curSig = nextSig;
       identicalPolls = 0;
     }
   }
 
-  const snap = await lastAssistantText(page);
-  if (snap && snap !== before) {
-    emit(snap);
-    return snap.length >= cur.length ? snap : cur;
+  const snapText = await lastAssistantText(page);
+  const snapSig = await latestAssistantTurnSignature(page);
+  if (!isVacuumAssistantSig(snapSig)) {
+    emitTextDelta(snapText);
+    if (!assistantBubbleShowsImagePlaceholder(snapText)) {
+      return snapText.length >= curText.length ? snapText : curText;
+    }
   }
-  return cur;
+  return curText;
 }
 
 /**
- * After sending, wait until the last assistant message differs from `before` and text stops changing.
- * If `onDelta` is set, it is called whenever the latest assistant text changes (polling DOM).
+ * After sending, wait until the latest assistant **turn** changes (text and/or images), then until stable.
+ * `onDelta` runs when streamed **text** changes; image-only replies may not trigger it.
  */
 async function waitForAssistantReply(
   page: Page,
-  before: string,
+  baselineSig: string,
   timeoutMs: number,
   stream: AssistantStreamOptions = {},
 ): Promise<string> {
@@ -159,46 +239,148 @@ async function waitForAssistantReply(
   const pollTail = onDelta ? 300 : 450;
   const stableNeed = onDelta ? 8 : 3;
 
-  const emit = (cur: string) => {
-    if (onDelta && cur && cur !== before) onDelta(cur);
+  /** Stream assistant text without echoing duplicate strings; skip initial empty scrape. */
+  let lastStreamedText: string | null = null;
+  const emitTextDelta = (fullText: string) => {
+    if (!onDelta) return;
+    if (lastStreamedText !== null && fullText === lastStreamedText) return;
+    if (lastStreamedText === null && fullText === "") {
+      lastStreamedText = "";
+      return;
+    }
+    lastStreamedText = fullText;
+    onDelta(fullText);
   };
 
   const deadline = Date.now() + timeoutMs;
+  replDebug("waitForAssistantReply: start", {
+    timeoutMs,
+    baselineSigLen: baselineSig.length,
+    debugLogFile: process.env.MIRA_DEBUG_REPL_FILE?.trim() || null,
+  });
+
+  let firstLoopIters = 0;
+  let lastFirstLogAt = 0;
+  let confirmedSig: string | null = null;
 
   while (Date.now() < deadline) {
-    const cur = await lastAssistantText(page);
-    emit(cur);
-    if (cur && cur !== before) break;
+    firstLoopIters++;
+    const sig = await latestAssistantTurnSignature(page);
+    if (sig !== baselineSig) {
+      const curText = await lastAssistantText(page);
+      emitTextDelta(curText);
+      confirmedSig = sig;
+      replDebug("waitForAssistantReply: first turn delta", {
+        iters: firstLoopIters,
+        textLen: curText.length,
+        imgFingerPrint: sig.slice(0, 240),
+      });
+      break;
+    }
+    if (replDebugEnabled() && Date.now() - lastFirstLogAt > 4_000) {
+      lastFirstLogAt = Date.now();
+      const curText = await lastAssistantText(page);
+      replDebug("waitForAssistantReply: waiting first turn delta", {
+        iters: firstLoopIters,
+        textLen: curText.length,
+        sigUnchanged: true,
+      });
+    }
     await page.waitForTimeout(pollStart);
   }
 
-  const budgetAfterFirst = Math.max(5_000, deadline - Date.now());
-  await waitForStopHidden(page, budgetAfterFirst);
+  if (!confirmedSig) {
+    replDebug("waitForAssistantReply: timed out before assistant turn changed");
+    throw new Error(
+      "Timed out waiting for an assistant reply. Check the browser window: login, captcha, or UI changes.",
+    );
+  }
 
-  let last = await lastAssistantText(page);
-  emit(last);
+  const budgetAfterFirst = Math.max(5_000, deadline - Date.now());
+  replDebug("waitForAssistantReply: wait stop generating…", { budgetMs: budgetAfterFirst });
+  await waitForStopHidden(page, budgetAfterFirst);
+  replDebug("waitForAssistantReply: stop hidden (or timed waiting visible)");
+
+  const resyncMs = assistantDomResyncMs();
+  const domOk = await waitAssistantTurnPresent(page, resyncMs);
+  replDebug("waitForAssistantReply: DOM resync assistant row", { ok: domOk, budgetMs: resyncMs });
+  if (!domOk) {
+    replDebug(
+      "waitForAssistantReply: WARNING — no assistant DOM nodes matched selectors after Stop; stability may spin until timeout (ChatGPT UI change?).",
+    );
+  }
+
+  const postStopImgMs = Math.min(assistantImageReadyMs(), Math.max(0, deadline - Date.now()));
+  if (postStopImgMs >= 500) await waitForAssistantTurnImagesReady(page, postStopImgMs);
+  replDebug("waitForAssistantReply: post-stop image idle done");
+
+  let lastTxt = await lastAssistantText(page);
+  let lastFp = await latestAssistantTurnSignature(page);
+  if (isVacuumAssistantSig(lastFp)) {
+    replDebug("waitForAssistantReply: stability entry fingerprint still vacuum after resync");
+  }
+  emitTextDelta(lastTxt);
+  replDebug("waitForAssistantReply: stability poll phase", {
+    textLen: lastTxt.length,
+    fpPrefix: lastFp.slice(0, 180),
+  });
+
   let stableTicks = 0;
+  let lastStuckLog = 0;
   while (Date.now() < deadline) {
     await page.waitForTimeout(pollTail);
-    const cur = await lastAssistantText(page);
-    if (!cur || cur === before) continue;
-    emit(cur);
-    if (cur === last) {
+    const fp = await latestAssistantTurnSignature(page);
+    const txt = await lastAssistantText(page);
+    if (isVacuumAssistantSig(fp)) {
+      const now = Date.now();
+      if (now - lastStuckLog > 8_000) {
+        lastStuckLog = now;
+        if (replDebugEnabled()) {
+          replDebug("waitForAssistantReply: vacuum fingerprint tick (assistant DOM gap)");
+        }
+        await scrollConversationIntoView(page);
+      }
+      continue;
+    }
+    emitTextDelta(txt);
+    if (assistantBubbleShowsImagePlaceholder(txt)) {
+      stableTicks = 0;
+      lastFp = fp;
+      continue;
+    }
+    if (fp === lastFp) {
       stableTicks++;
+      if (replDebugEnabled()) {
+        const now = Date.now();
+        if (now - lastStuckLog > 12_000) {
+          lastStuckLog = now;
+          replDebug("waitForAssistantReply: polling", {
+            stableTicks,
+            need: stableNeed,
+            textLen: txt.length,
+            fpStable: true,
+          });
+        }
+      }
       if (stableTicks >= stableNeed) {
-        return finalizeAssistantReply(page, before, cur, pollTail, deadline, emit);
+        replDebug("waitForAssistantReply: fingerprint stable → finalize");
+        return finalizeAssistantReply(page, baselineSig, txt, fp, pollTail, deadline, emitTextDelta);
       }
     } else {
       stableTicks = 0;
-      last = cur;
+      lastFp = fp;
+      lastTxt = txt;
     }
   }
 
-  const out = await lastAssistantText(page);
-  emit(out);
-  if (out && out !== before) {
-    return out.length >= last.length ? out : last;
+  const outTxt = await lastAssistantText(page);
+  const outFp = await latestAssistantTurnSignature(page);
+  emitTextDelta(outTxt);
+  if (!isVacuumAssistantSig(outFp)) {
+    replDebug("waitForAssistantReply: deadline tail return");
+    return outTxt.length >= lastTxt.length ? outTxt : lastTxt;
   }
+  replDebug("waitForAssistantReply: timed out");
   throw new Error(
     "Timed out waiting for an assistant reply. Check the browser window: login, captcha, or UI changes.",
   );
@@ -221,7 +403,7 @@ export class ChatGptSession {
       await hooks.afterNavigate();
     }
     try {
-      await waitForComposerMount(this.page, COMPOSER_READY_MS);
+      await waitForComposerMount(this.page, composerReadyMs());
     } catch (e) {
       const hint = this.headless
         ? " Headless runs are often blocked; try without --headless, or set CHATGPT_REPL_CHANNEL=chrome to use your installed Google Chrome."
@@ -233,7 +415,7 @@ export class ChatGptSession {
 
   async newConversation(): Promise<void> {
     await clickNewChat(this.page);
-    await waitForComposerMount(this.page, COMPOSER_READY_MS);
+    await waitForComposerMount(this.page, composerReadyMs());
   }
 
   /** Set the chat title via the web UI (⋯ → Rename). */
@@ -249,12 +431,12 @@ export class ChatGptSession {
     text: string,
     opts: { responseTimeoutMs?: number; onAssistantDelta?: (fullText: string) => void } = {},
   ): Promise<string> {
-    const timeoutMs = opts.responseTimeoutMs ?? 240_000;
+    const timeoutMs = opts.responseTimeoutMs ?? responseTimeoutMs();
     const stream: AssistantStreamOptions =
       opts.onAssistantDelta !== undefined ? { onDelta: opts.onAssistantDelta } : {};
 
     const page = this.page;
-    const before = await lastAssistantText(page);
+    const baselineSig = await latestAssistantTurnSignature(page);
 
     const box = await findPromptBox(page);
     await box.scrollIntoViewIfNeeded().catch(() => undefined);
@@ -280,7 +462,7 @@ export class ChatGptSession {
     }
 
     await submitMessage(page);
-    return waitForAssistantReply(page, before, timeoutMs, stream);
+    return waitForAssistantReply(page, baselineSig, timeoutMs, stream);
   }
 
   /**

@@ -3,7 +3,7 @@ import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import fs from "node:fs";
 import path from "node:path";
-import { defaultProfileDir, packageRoot } from "./paths.js";
+import { defaultProfileDir, packageRoot, preferencesPath } from "./paths.js";
 import { launchChatGptContext } from "./launch.js";
 import { chromiumInstallHint } from "./playwrightHint.js";
 import { CHAT_URL, ChatGptSession, openPage } from "./session.js";
@@ -13,6 +13,8 @@ import {
   composePrimingInstructions,
   CLI_USER_MESSAGE_SEPARATOR,
   defaultInstructionsPath,
+  formatSixelsPreferenceNotice,
+  formatSixelsResumeNotice,
   formatTerminalSessionBlock,
   formatUserInstructionsRefreshBlock,
   readUserInstructionsSnap,
@@ -38,6 +40,11 @@ import { createMultilineReplInput } from "./replInput.js";
 import { maybePromptGitUpdate } from "./gitUpdate.js";
 import { formatInstalledVersionLines, formatWhoamiLines } from "./versionInfo.js";
 import { openPathWithSystemDefault } from "./osOpen.js";
+import { loadPreferences, savePreferences } from "./preferences.js";
+import { captureLastAssistantImages, waitForAssistantTurnImagesReady } from "./assistantImages.js";
+import { assistantImageReadyMs } from "./replTimeouts.js";
+import { pngBufferToSixelSequence, terminalFitSixelOptions } from "./sixelEncode.js";
+import { lennaTestPngBuffer } from "./lennaTestImage.js";
 
 const DEFAULT_HISTORY_LIST_LIMIT = 10;
 const HISTORY_LIST_CAP = 500;
@@ -142,6 +149,8 @@ function printHelp(): void {
   helpRow("/version", "Show npm package version and git commit (when installed from a clone)");
   helpRow("/whoami", "Show package path, git root, browser profile, state dir");
   helpRow("/instructions", "Open custom instructions file (~/.mira/instructions.txt)");
+  helpRow("/sixels …", "Terminal inline images → sixels: on · off · status (saved)");
+  helpRow("/test-sixel", "Emit embedded Lenna PNG as sixels (TTY probe; ignores prefs / capture)");
   helpRow("/quit", "Exit — archives by default; saves thread to history + resume hints");
   console.log();
 
@@ -158,6 +167,21 @@ function printHelp(): void {
   helpRow("--no-prime", "Do not merge CLI instructions into the first message");
   helpRow("--limit / -n", `History list rows (default ${DEFAULT_HISTORY_LIST_LIMIT}; --all caps at ${HISTORY_LIST_CAP})`);
   console.log(`  ${ui.dim("Env:")} ${ui.gray("MIRA_SKIP_UPDATE_CHECK=1")}${ui.dim(" skip git upstream prompt on launch.")}`);
+  console.log(`      ${ui.gray("MIRA_DEBUG_REPL=1")}${ui.dim(" stderr traces for reply waits + sixel capture.")}`);
+  console.log(
+    `      ${ui.gray("MIRA_DEBUG_REPL_FILE")}${ui.dim(" append same traces to a file path (readable during spinner noise).")}`,
+  );
+  console.log(
+    `      ${ui.gray("MIRA_DISABLE_SIXELS=1")}${ui.dim(" force-disable sixel drawing after replies.")}`,
+  );
+  console.log(
+    `      ${ui.gray("MIRA_MAX_ASSISTANT_IMAGES=N")}${ui.dim(" max screenshots per reply (default 8).")}`,
+  );
+  console.log(
+    `      ${ui.dim("Timeouts (ms; defaults shown):")} ${ui.gray("MIRA_RESPONSE_TIMEOUT_MS")}${ui.dim("=480000 ")}` +
+      `${ui.gray("MIRA_COMPOSER_READY_MS")}${ui.dim("=180000 ")}${ui.gray("MIRA_ASSISTANT_IMAGE_READY_MS")}${ui.dim("=120000 ")}` +
+      `${ui.gray("MIRA_ASSISTANT_DOM_RESYNC_MS")}${ui.dim("=25000 — full list in ")}${ui.gray("src/replTimeouts.ts")}${ui.dim(".")}`,
+  );
   console.log();
 
   console.log(`  ${ui.dim("Streaming reads the page DOM; if sending breaks, adjust selectors. Set NO_COLOR=1 to strip ANSI.")}`);
@@ -467,7 +491,15 @@ async function runRepl(
     );
   }
 
-  let pendingPrime = !noPrime && !chatUrl ? composePrimingInstructions().trim() : "";
+  let prefs = loadPreferences();
+
+  let pendingPrime = !noPrime && !chatUrl ? composePrimingInstructions({ sixelsEnabled: prefs.sixelsEnabled }).trim() : "";
+
+  /** When non-null, prepended once above the human separator on the next outbound message. */
+  let pendingSixelsNotice: string | null = null;
+
+  /** One-shot hint after --chat-url when prefs already enable sixels (full prime skipped). */
+  let pendingResumeSixelsHint = Boolean(chatUrl && prefs.sixelsEnabled);
 
   let lastUserInstructionsFingerprint: string | undefined;
 
@@ -476,7 +508,7 @@ async function runRepl(
     console.log();
   }
 
-  ui.banner({ resumedChat: Boolean(chatUrl) });
+  ui.banner({ resumedChat: Boolean(chatUrl), sixelsEnabled: prefs.sixelsEnabled });
 
   const replIn = createMultilineReplInput({
     getPrompt: () => ui.promptYou(),
@@ -485,6 +517,29 @@ async function runRepl(
 
   /** Last terminal size embedded in an outbound message (null until first send). */
   let lastTerminalSent: { cols: number; rows: number } | null = null;
+
+  async function emitAssistantSixelsAfterReplyOk(): Promise<void> {
+    if (!prefs.sixelsEnabled) return;
+    if (!output.isTTY || process.env.MIRA_DISABLE_SIXELS === "1") return;
+    const { cols } = snapshotTerminalSize();
+    try {
+      const imgBudget = Math.min(assistantImageReadyMs(), 180_000);
+      await waitForAssistantTurnImagesReady(page, imgBudget);
+      const shots = await captureLastAssistantImages(page);
+      if (shots.length === 0) return;
+      const opts = terminalFitSixelOptions(cols);
+      for (const buf of shots) {
+        try {
+          output.write(pngBufferToSixelSequence(buf, opts));
+          output.write("\n\n");
+        } catch {
+          /* skip corrupt screenshot */
+        }
+      }
+    } catch {
+      /* capture is best-effort */
+    }
+  }
 
   async function sendChatMessage(toSend: string): Promise<void> {
     ui.printUserMessageBubble(toSend);
@@ -507,12 +562,37 @@ async function runRepl(
       userInstrAttach = `${formatUserInstructionsRefreshBlock(snapNow)}\n\n`;
     }
 
-    let payload = toSend;
+    let sixelsNoticeChunk = "";
+    const resumeHint =
+      pendingResumeSixelsHint && prefs.sixelsEnabled ? `${formatSixelsResumeNotice().trim()}\n\n` : "";
+    if (pendingResumeSixelsHint) {
+      pendingResumeSixelsHint = false;
+    }
+    if (pendingSixelsNotice) {
+      sixelsNoticeChunk = `${resumeHint}${pendingSixelsNotice.trim()}\n\n`;
+      pendingSixelsNotice = null;
+    } else if (resumeHint) {
+      sixelsNoticeChunk = resumeHint;
+    }
+
+    const headParts: string[] = [];
     if (primeSnapshot) {
       pendingPrime = "";
-      payload = `${primeSnapshot}\n\n${sessionGeo}${userInstrAttach}${CLI_USER_MESSAGE_SEPARATOR}${toSend}`;
-    } else if (sessionGeo || userInstrAttach) {
-      payload = `${sessionGeo}${userInstrAttach}${CLI_USER_MESSAGE_SEPARATOR}${toSend}`;
+      headParts.push(primeSnapshot.trimEnd());
+    }
+    if (sixelsNoticeChunk.trim()) {
+      headParts.push(sixelsNoticeChunk.trimEnd());
+    }
+    if (sessionGeo.trim()) {
+      headParts.push(sessionGeo.trimEnd());
+    }
+    if (userInstrAttach.trim()) {
+      headParts.push(userInstrAttach.trimEnd());
+    }
+
+    let payload = toSend;
+    if (headParts.length > 0) {
+      payload = `${headParts.join("\n\n")}\n\n${CLI_USER_MESSAGE_SEPARATOR}${toSend}`;
     }
 
     ui.miraReplyBegin();
@@ -586,6 +666,10 @@ async function runRepl(
         lastUserInstructionsFingerprint = readUserInstructionsSnap().fingerprint;
       }
     }
+
+    if (sendCompletedOk) {
+      await emitAssistantSixelsAfterReplyOk();
+    }
   }
 
   try {
@@ -650,6 +734,56 @@ async function runRepl(
         }
         continue;
       }
+      if (singleLine && (one === "/test-sixel" || one === "/test-sixels")) {
+        if (!output.isTTY) {
+          ui.warn("Not a TTY — sixels only render in an interactive terminal.");
+          continue;
+        }
+        if (process.env.MIRA_DISABLE_SIXELS === "1") {
+          ui.warn("Sixels blocked by MIRA_DISABLE_SIXELS=1 (unset to probe).");
+          continue;
+        }
+        try {
+          const { cols } = snapshotTerminalSize();
+          const seq = pngBufferToSixelSequence(lennaTestPngBuffer(), terminalFitSixelOptions(cols));
+          output.write(seq);
+          output.write("\n\n");
+          ui.ok('If sixels work here, you should see the classic "Lenna" portrait above.');
+        } catch (e) {
+          ui.err(e instanceof Error ? e.message : String(e));
+        }
+        continue;
+      }
+      if (singleLine && (one === "/sixels" || one.startsWith("/sixels "))) {
+        const arg = one.slice("/sixels".length).trim().toLowerCase();
+        if (!arg || arg === "status") {
+          ui.tip(
+            `Sixel capture after replies: ${prefs.sixelsEnabled ? "on" : "off"} (${preferencesPath()}). ` +
+              `Usage: /sixels on | off`,
+          );
+          continue;
+        }
+        if (arg === "on" || arg === "true" || arg === "1") {
+          prefs.sixelsEnabled = true;
+          savePreferences(prefs);
+          pendingSixelsNotice = formatSixelsPreferenceNotice(true);
+          ui.ok("Sixels on — saved. Your next message carries a model notice.");
+          console.log(`      ${ui.dim(preferencesPath())}`);
+          console.log();
+          continue;
+        }
+        if (arg === "off" || arg === "false" || arg === "0") {
+          prefs.sixelsEnabled = false;
+          savePreferences(prefs);
+          pendingSixelsNotice = formatSixelsPreferenceNotice(false);
+          ui.ok("Sixels off — saved. Your next message carries a model notice.");
+          console.log(`      ${ui.dim(preferencesPath())}`);
+          console.log();
+          continue;
+        }
+        ui.tip("Usage: /sixels [on | off | status]");
+        continue;
+      }
       if (singleLine && (one.startsWith("/name ") || one.startsWith("/rename "))) {
         const title = one.replace(/^\/(name|rename)\s+/, "").trim();
         if (!title) {
@@ -668,9 +802,10 @@ async function runRepl(
       if (singleLine && one === "/new") {
         try {
           await session.newConversation();
-          pendingPrime = !noPrime ? composePrimingInstructions().trim() : "";
+          pendingPrime = !noPrime ? composePrimingInstructions({ sixelsEnabled: prefs.sixelsEnabled }).trim() : "";
           lastTerminalSent = null;
           lastUserInstructionsFingerprint = undefined;
+          pendingResumeSixelsHint = false;
           ui.ok("New conversation. Blank slate, same swagger.");
         } catch (e) {
           ui.err(e instanceof Error ? e.message : String(e));

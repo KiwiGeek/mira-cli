@@ -21,3 +21,8 @@ export function defaultProfileDir(): string {
 export function chatHistoryPath(): string {
   return path.join(miraStateDir(), "conversations.json");
 }
+
+/** Persisted REPL preferences (e.g. sixel rendering). */
+export function preferencesPath(): string {
+  return path.join(miraStateDir(), "preferences.json");
+}
