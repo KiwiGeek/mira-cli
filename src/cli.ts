@@ -26,6 +26,7 @@ import {
   type AssistantStreamLineState,
 } from "./assistantFormat.js";
 import { createMultilineReplInput } from "./replInput.js";
+import { maybePromptGitUpdate } from "./gitUpdate.js";
 
 const DEFAULT_HISTORY_LIST_LIMIT = 10;
 const HISTORY_LIST_CAP = 500;
@@ -131,6 +132,7 @@ function printHelp(): void {
   helpRow("--chat-url", "Resume thread URL; skips merged first-message instructions");
   helpRow("--no-prime", "Do not merge CLI instructions into the first message");
   helpRow("--limit / -n", `History list rows (default ${DEFAULT_HISTORY_LIST_LIMIT}; --all caps at ${HISTORY_LIST_CAP})`);
+  console.log(`  ${ui.dim("Env:")} ${ui.gray("MIRA_SKIP_UPDATE_CHECK=1")}${ui.dim(" skip git upstream prompt on launch.")}`);
   console.log();
 
   console.log(`  ${ui.dim("Streaming reads the page DOM; if sending breaks, adjust selectors. Set NO_COLOR=1 to strip ANSI.")}`);
@@ -337,6 +339,7 @@ async function ensureProfileDir(dir: string): Promise<void> {
 
 async function runLogin(profileDir: string): Promise<void> {
   await ensureProfileDir(profileDir);
+  await maybePromptGitUpdate();
   ui.line();
   console.log(`  ${ui.bold("Login")}  ${ui.dim("— opening Chromium with profile:")}`);
   console.log(`  ${ui.gray(profileDir)}`);
@@ -390,6 +393,7 @@ async function runRepl(
   verbose: boolean,
 ): Promise<void> {
   await ensureProfileDir(profileDir);
+  await maybePromptGitUpdate();
   let context;
   try {
     context = await launchChatGptContext(profileDir, headless, {
