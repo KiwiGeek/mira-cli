@@ -27,6 +27,7 @@ import {
 } from "./assistantFormat.js";
 import { createMultilineReplInput } from "./replInput.js";
 import { maybePromptGitUpdate } from "./gitUpdate.js";
+import { formatInstalledVersionLines } from "./versionInfo.js";
 
 const DEFAULT_HISTORY_LIST_LIMIT = 10;
 const HISTORY_LIST_CAP = 500;
@@ -117,6 +118,7 @@ function printHelp(): void {
   helpRow("/show", "Show browser, move window on-screen (Win32 + CDP)");
   helpRow("/debug-window", "Dump HWNDs (Windows · stderr)");
   helpRow("/help", "This help");
+  helpRow("/version", "Show npm package version and git commit (when installed from a clone)");
   helpRow("/quit", "Exit — archives by default; saves thread to history + resume hints");
   console.log();
 
@@ -569,6 +571,17 @@ async function runRepl(
       }
       if (singleLine && one === "/help") {
         printHelp();
+        continue;
+      }
+      if (singleLine && one === "/version") {
+        const lines = formatInstalledVersionLines();
+        if (lines.length > 0) {
+          console.log(`  ${ui.green("ok")}  ${lines[0]}`);
+          for (let i = 1; i < lines.length; i++) {
+            console.log(`      ${ui.dim(lines[i]!)}`);
+          }
+          console.log();
+        }
         continue;
       }
       if (singleLine && (one.startsWith("/name ") || one.startsWith("/rename "))) {
