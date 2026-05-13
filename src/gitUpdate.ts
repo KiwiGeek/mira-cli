@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import path from "node:path";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { packageRoot } from "./paths.js";
@@ -80,6 +81,25 @@ function isStrictAncestor(gitRoot: string, ancestor: string, descendant: string)
   return r.code === 0;
 }
 
+/** Re-exec this CLI with the same Node binary and arguments (preserves interactive stdio). */
+function relaunchRunningCli(): never {
+  const node = process.execPath;
+  const script = process.argv[1] ?? path.join(packageRoot(), "dist", "cli.js");
+  try {
+    const r = spawnSync(node, [script, ...process.argv.slice(2)], {
+      stdio: "inherit",
+      env: process.env,
+      cwd: process.cwd(),
+      windowsHide: true,
+    });
+    process.exit(typeof r.status === "number" ? r.status : 1);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    ui.warn(`Could not restart automatically (${msg}). Run mira again.`);
+    process.exit(1);
+  }
+}
+
 /**
  * If this install lives in a git clone with `origin`, compare to `origin/release` when that branch
  * exists, else `origin/master`. When the remote is strictly ahead, offer a fast-forward pull and rebuild.
@@ -147,8 +167,9 @@ export async function maybePromptGitUpdate(): Promise<void> {
   });
   if (build.status !== 0) {
     ui.warn("npm run build failed — run it in the repo, then start mira again.");
-  } else {
-    ui.tip("Restart mira to run the rebuilt CLI.");
+    process.exit(1);
   }
-  process.exit(0);
+
+  ui.tip("Restarting with updated CLI…");
+  relaunchRunningCli();
 }
