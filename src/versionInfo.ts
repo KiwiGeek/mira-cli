@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { packageRoot } from "./paths.js";
+import { defaultInstructionsPath } from "./cliInstructions.js";
+import { miraStateDir, packageRoot } from "./paths.js";
 
 function gitStdout(root: string, args: string[]): string | null {
   const r = spawnSync("git", args, {
@@ -48,5 +49,20 @@ export function formatInstalledVersionLines(): string[] {
   const describe = gitStdout(root, ["describe", "--tags", "--always", "--dirty"]);
   if (describe) lines.push(`describe ${describe}`);
 
+  return lines;
+}
+
+/** Lines printed by `/whoami` (paths + active profile + short HEAD). */
+export function formatWhoamiLines(activeBrowserProfileDir: string): string[] {
+  const pkg = packageRoot();
+  const lines: string[] = [];
+  lines.push(`package ${pkg}`);
+  const gt = gitStdout(pkg, ["rev-parse", "--show-toplevel"]);
+  lines.push(gt ? `git root ${gt}` : "git root (none)");
+  lines.push(`browser profile ${activeBrowserProfileDir}`);
+  lines.push(`state dir ${miraStateDir()}`);
+  lines.push(`instructions ${defaultInstructionsPath()}`);
+  const sh = gitStdout(pkg, ["rev-parse", "--short", "HEAD"]);
+  if (sh) lines.push(`HEAD ${sh}`);
   return lines;
 }

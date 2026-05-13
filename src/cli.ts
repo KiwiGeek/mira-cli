@@ -27,7 +27,7 @@ import {
 } from "./assistantFormat.js";
 import { createMultilineReplInput } from "./replInput.js";
 import { maybePromptGitUpdate } from "./gitUpdate.js";
-import { formatInstalledVersionLines } from "./versionInfo.js";
+import { formatInstalledVersionLines, formatWhoamiLines } from "./versionInfo.js";
 
 const DEFAULT_HISTORY_LIST_LIMIT = 10;
 const HISTORY_LIST_CAP = 500;
@@ -130,6 +130,7 @@ function printHelp(): void {
   helpRow("/clear", "Clear the terminal viewport");
   helpRow("/help", "This help");
   helpRow("/version", "Show npm package version and git commit (when installed from a clone)");
+  helpRow("/whoami", "Show package path, git root, browser profile, state dir");
   helpRow("/quit", "Exit — archives by default; saves thread to history + resume hints");
   console.log();
 
@@ -593,6 +594,15 @@ async function runRepl(
           }
           console.log();
         }
+        continue;
+      }
+      if (singleLine && one === "/whoami") {
+        const lines = formatWhoamiLines(profileDir);
+        console.log(`  ${ui.green("ok")}  ${lines[0]}`);
+        for (let i = 1; i < lines.length; i++) {
+          console.log(`      ${ui.dim(lines[i]!)}`);
+        }
+        console.log();
         continue;
       }
       if (singleLine && one === "/clear") {
