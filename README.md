@@ -87,11 +87,19 @@ Full details: run `npm run mira -- --help` (or see `src/cli.ts`).
 
 ### REPL commands
 
-Examples: `/help`, `/version`, `/whoami`, `/clear`, `/new`, `/name My chat title`, `/show`, `/quit`. On **`/quit`**, Mira **archives** the conversation by default and prints a `npm run mira -- --chat-url "…"` command you can use to resume.
+Examples: `/help`, `/version`, `/whoami`, `/instructions`, `/clear`, `/new`, `/name My chat title`, `/show`, `/quit`. On **`/quit`**, Mira **archives** the conversation by default and prints a `npm run mira -- --chat-url "…"` command you can use to resume.
 
 ## Custom instructions
 
-Optional file (path is shown on first run / `--help`): `%USERPROFILE%\.mira\instructions.txt` on Windows, or `$HOME/.mira/instructions.txt` elsewhere. If present, it replaces the built-in Mira preamble.
+Optional file (path is shown on **`--help`**): `%USERPROFILE%\.mira\instructions.txt` on Windows, or `$HOME/.mira/instructions.txt` elsewhere.
+
+The **built-in CLI preamble is always sent first** when priming applies (new chats, **`/new`**). If that file exists and has non-whitespace contents, its contents are **appended after** the built-in preamble on the first primed message.
+
+Use **`/instructions`** in the REPL to create or open the file in your OS default application. After you save edits, your **next message** includes an update block so Mira treats the new file contents as replacing earlier additional instructions from that file.
+
+With **`--no-prime`**, neither the built-in primer nor automatic layering from **`instructions.txt`** runs.
+
+With **`--chat-url`** (resume), the built-in primer is still omitted as before; changes to **`instructions.txt`** can still be sent as an update block on a later message when the file changes.
 
 ## Development notes
 

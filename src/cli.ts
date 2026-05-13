@@ -9,7 +9,16 @@ import { chromiumInstallHint } from "./playwrightHint.js";
 import { CHAT_URL, ChatGptSession, openPage } from "./session.js";
 import { hideBrowserWindow, showBrowserWindow } from "./hideWindow.js";
 import { diagnoseBrowserWindows, isWin32, windowDebugEnabled } from "./win32Window.js";
-import { defaultInstructionsPath, loadCliInstructions, CLI_USER_MESSAGE_SEPARATOR, formatTerminalSessionBlock, snapshotTerminalSize } from "./cliInstructions.js";
+import {
+  composePrimingInstructions,
+  CLI_USER_MESSAGE_SEPARATOR,
+  defaultInstructionsPath,
+  formatTerminalSessionBlock,
+  formatUserInstructionsRefreshBlock,
+  readUserInstructionsSnap,
+  snapshotTerminalSize,
+  ensureUserInstructionsFile,
+} from "./cliInstructions.js";
 import {
   conversationIdFromChatUrl,
   formatShortConversationId,
@@ -28,6 +37,7 @@ import {
 import { createMultilineReplInput } from "./replInput.js";
 import { maybePromptGitUpdate } from "./gitUpdate.js";
 import { formatInstalledVersionLines, formatWhoamiLines } from "./versionInfo.js";
+import { openPathWithSystemDefault } from "./osOpen.js";
 
 const DEFAULT_HISTORY_LIST_LIMIT = 10;
 const HISTORY_LIST_CAP = 500;
@@ -118,7 +128,7 @@ function printHelp(): void {
   console.log();
 
   console.log(`  ${ui.bold(ui.cyan("Custom instructions"))}`);
-  console.log(`    ${ui.dim("Optional file replaces the built-in preamble:")}`);
+  console.log(`    ${ui.dim("Built-in preamble first; optional file appends after it. Open/edit with")} ${ui.gray("/instructions")}`);
   console.log(`    ${ui.gray(defaultInstructionsPath())}`);
   console.log();
 
@@ -131,6 +141,7 @@ function printHelp(): void {
   helpRow("/help", "This help");
   helpRow("/version", "Show npm package version and git commit (when installed from a clone)");
   helpRow("/whoami", "Show package path, git root, browser profile, state dir");
+  helpRow("/instructions", "Open custom instructions file (~/.mira/instructions.txt)");
   helpRow("/quit", "Exit — archives by default; saves thread to history + resume hints");
   console.log();
 
@@ -456,7 +467,9 @@ async function runRepl(
     );
   }
 
-  let pendingPrime = !noPrime && !chatUrl ? loadCliInstructions().trim() : "";
+  let pendingPrime = !noPrime && !chatUrl ? composePrimingInstructions().trim() : "";
+
+  let lastUserInstructionsFingerprint: string | undefined;
 
   if (pendingPrime && verbose) {
     console.log(`  ${ui.dim("CLI instructions will be sent with your first message (one assistant reply).")}`);
@@ -487,12 +500,19 @@ async function runRepl(
       lastTerminalSent = { cols, rows };
     }
 
+    const primeSnapshot = pendingPrime;
+    let userInstrAttach = "";
+    const snapNow = readUserInstructionsSnap();
+    if (!noPrime && !primeSnapshot && snapNow.fingerprint !== lastUserInstructionsFingerprint) {
+      userInstrAttach = `${formatUserInstructionsRefreshBlock(snapNow)}\n\n`;
+    }
+
     let payload = toSend;
-    if (pendingPrime) {
-      payload = `${pendingPrime}\n\n${sessionGeo}${CLI_USER_MESSAGE_SEPARATOR}${toSend}`;
+    if (primeSnapshot) {
       pendingPrime = "";
-    } else if (sessionGeo) {
-      payload = `${sessionGeo}${CLI_USER_MESSAGE_SEPARATOR}${toSend}`;
+      payload = `${primeSnapshot}\n\n${sessionGeo}${userInstrAttach}${CLI_USER_MESSAGE_SEPARATOR}${toSend}`;
+    } else if (sessionGeo || userInstrAttach) {
+      payload = `${sessionGeo}${userInstrAttach}${CLI_USER_MESSAGE_SEPARATOR}${toSend}`;
     }
 
     ui.miraReplyBegin();
@@ -514,6 +534,7 @@ async function runRepl(
       box.open();
     };
 
+    let sendCompletedOk = false;
     try {
       if (noStream) {
         const reply = await session.send(payload);
@@ -552,6 +573,7 @@ async function runRepl(
           box.write(formatAssistantBullets(norm));
         }
       }
+      sendCompletedOk = true;
     } catch (err) {
       process.stdout.write("\n");
       const msg = err instanceof Error ? err.message : String(err);
@@ -560,6 +582,9 @@ async function runRepl(
       stopSpin();
       if (box.isOpen()) box.close();
       process.stdout.write("\n");
+      if (sendCompletedOk && !noPrime) {
+        lastUserInstructionsFingerprint = readUserInstructionsSnap().fingerprint;
+      }
     }
   }
 
@@ -605,8 +630,20 @@ async function runRepl(
         console.log();
         continue;
       }
-      if (singleLine && one === "/clear") {
-        clearReplViewport();
+      if (singleLine && one === "/instructions") {
+        try {
+          const p = ensureUserInstructionsFile();
+          if (openPathWithSystemDefault(p)) {
+            ui.ok("Opened instructions file in your default app.");
+            console.log(`      ${ui.dim(p)}`);
+            console.log(`      ${ui.dim("Save when done — your next message carries changes (built-in preamble stays first).")}`);
+            console.log();
+          } else {
+            ui.warn(`Could not launch an editor for:\n      ${p}\n      Open that path manually.`);
+          }
+        } catch (e) {
+          ui.err(e instanceof Error ? e.message : String(e));
+        }
         continue;
       }
       if (singleLine && (one.startsWith("/name ") || one.startsWith("/rename "))) {
@@ -627,8 +664,9 @@ async function runRepl(
       if (singleLine && one === "/new") {
         try {
           await session.newConversation();
-          pendingPrime = !noPrime ? loadCliInstructions().trim() : "";
+          pendingPrime = !noPrime ? composePrimingInstructions().trim() : "";
           lastTerminalSent = null;
+          lastUserInstructionsFingerprint = undefined;
           ui.ok("New conversation. Blank slate, same swagger.");
         } catch (e) {
           ui.err(e instanceof Error ? e.message : String(e));

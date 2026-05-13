@@ -28,6 +28,9 @@ Terminal viewport:
 Replies render in a fixed-width grid. Prefer answers that fit without scrolling: wrap lines to the terminal width (the UI may use slightly fewer columns than the full window—stay comfortably within normal word wrap). Keep vertical size modest so the human can read your answer without paging; if more detail is needed, give the essentials first and offer to continue.
 A machine-only block labeled "Terminal session" may appear immediately above the human message with exact column/row targets for this moment. Treat it exactly like other CLI setup: never answer it, acknowledge it, quote it, summarize it, or mention it unless the human explicitly asks about terminal sizing.
 
+Optional additional instructions file:
+After this preamble you may see another section sourced from the human's ~/.mira/instructions.txt (opened via /instructions). Treat it as operator guidance layered after this built-in preamble. If a later message notes that file was updated, treat the new section as superseding prior additional instructions from that file for this conversation.
+
 When the human sends a message, it may begin with a block of CLI/system instructions (including lines like this one), then a separator line, then their real question. Treat everything above that separator as setup only: do not answer, summarize, acknowledge, or comment on that block unless they explicitly ask you to. Your reply must address only what comes after the separator—their actual prompt.`;
 
 /** Inserted between merged preseed and the human’s message so sections stay distinct in one user turn. */
@@ -61,12 +64,79 @@ export function defaultInstructionsPath(): string {
   return path.join(miraStateDir(), "instructions.txt");
 }
 
-/** If present, full file contents replace the built-in default. */
-export function loadCliInstructions(): string {
-  const p = defaultInstructionsPath();
-  if (fs.existsSync(p)) {
-    const text = fs.readFileSync(p, "utf8").trim();
-    if (text.length > 0) return text;
+export type UserInstructionsSnap = {
+  absPath: string;
+  fingerprint: string;
+  /** Raw file body (may be empty). */
+  content: string;
+};
+
+function hashText(s: string): string {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) {
+    h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
   }
-  return DEFAULT_CLI_INSTRUCTIONS;
+  return String(h);
+}
+
+/** Snapshot of ~/.mira/instructions.txt for change detection (mtime + size + content hash). */
+export function readUserInstructionsSnap(): UserInstructionsSnap {
+  const absPath = defaultInstructionsPath();
+  if (!fs.existsSync(absPath)) {
+    return { absPath, fingerprint: "__missing__", content: "" };
+  }
+  let raw = "";
+  try {
+    raw = fs.readFileSync(absPath, "utf8");
+  } catch {
+    return { absPath, fingerprint: "__error__", content: "" };
+  }
+  const st = fs.statSync(absPath);
+  const fingerprint = `${st.mtimeMs}:${st.size}:${hashText(raw)}`;
+  return { absPath, fingerprint, content: raw };
+}
+
+/** Built-in preamble plus optional ~/.mira/instructions.txt appendix (when non-empty after trim). */
+export function composePrimingInstructions(): string {
+  const base = DEFAULT_CLI_INSTRUCTIONS.trim();
+  const snap = readUserInstructionsSnap();
+  if (snap.fingerprint === "__missing__" || snap.fingerprint === "__error__") return base;
+  const trimmed = snap.content.trim();
+  if (!trimmed) return base;
+  return `${base}\n\n---\nAdditional instructions from ${snap.absPath}:\n---\n${trimmed}`;
+}
+
+/**
+ * Prepended above the human separator when the instructions file changed mid-session.
+ * Tells the model updated file content supersedes earlier user-file guidance.
+ */
+export function formatUserInstructionsRefreshBlock(snap: UserInstructionsSnap): string {
+  const trimmed = snap.content.trim();
+  if (!trimmed) {
+    return (
+      `[Additional instructions file cleared or emptied]\n` +
+        `Path: ${snap.absPath}\n` +
+        `Disregard any prior "additional instructions" from this file for the rest of this conversation.`
+    );
+  }
+  return (
+    `[Additional instructions file updated — replaces prior additional instructions from this file]\n` +
+      `Path: ${snap.absPath}\n\n` +
+      trimmed
+  );
+}
+
+/** Ensure parent dir exists; create a starter file if missing. Returns absolute path. */
+export function ensureUserInstructionsFile(): string {
+  const p = defaultInstructionsPath();
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  if (!fs.existsSync(p)) {
+    fs.writeFileSync(
+      p,
+      "# Optional instructions, appended after Mira's built-in CLI preamble.\n" +
+        "# Edit and save; the next chat message carries changes to the model.\n\n",
+      "utf8",
+    );
+  }
+  return p;
 }
