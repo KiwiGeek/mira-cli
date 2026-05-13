@@ -12,12 +12,12 @@ Repository: [https://github.com/KiwiGeek/mira-cli](https://github.com/KiwiGeek/m
 irm https://raw.githubusercontent.com/KiwiGeek/mira-cli/master/scripts/install.ps1 | iex
 ```
 
-If your default branch is `main`, replace `master` in that URL. Optional overrides:
+The `…/master/scripts/…` URLs pull the installer script from the **`master`** branch on GitHub. The installer **clones branch `release`** by default (`MIRA_INSTALL_BRANCH`).
 
 | Environment variable   | Meaning |
 |------------------------|---------|
 | `MIRA_INSTALL_REPO`    | Git URL (default: this repo) |
-| `MIRA_INSTALL_BRANCH`  | Branch (default: `master`) |
+| `MIRA_INSTALL_BRANCH`  | Branch (default: `release`) |
 | `MIRA_INSTALL_DIR`     | Install root (default: `%LOCALAPPDATA%\mira-cli`) |
 
 On Windows without **winget**, install [Node.js 20+](https://nodejs.org/) and [Git](https://git-scm.com/) yourself, then run the script again.

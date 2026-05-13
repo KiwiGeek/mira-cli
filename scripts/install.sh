@@ -4,7 +4,7 @@
 set -euo pipefail
 
 REPO_URL="${MIRA_INSTALL_REPO:-https://github.com/KiwiGeek/mira-cli.git}"
-BRANCH="${MIRA_INSTALL_BRANCH:-master}"
+BRANCH="${MIRA_INSTALL_BRANCH:-release}"
 INSTALL_DIR="${MIRA_INSTALL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mira-cli}"
 BIN_DIR="${MIRA_INSTALL_BIN:-$HOME/.local/bin}"
 

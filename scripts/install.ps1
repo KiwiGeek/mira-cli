@@ -90,7 +90,7 @@ function Ensure-Git {
 }
 
 if (-not $RepoUrl) { $RepoUrl = "https://github.com/KiwiGeek/mira-cli.git" }
-if (-not $Branch) { $Branch = "master" }
+if (-not $Branch) { $Branch = "release" }
 if (-not $InstallDir) { $InstallDir = Join-Path $env:LOCALAPPDATA "mira-cli" }
 
 $InstallDir = [System.IO.Path]::GetFullPath($InstallDir)
@@ -123,7 +123,7 @@ if (Test-Path (Join-Path $InstallDir ".git")) {
   New-Item -ItemType Directory -Path (Split-Path -Parent $InstallDir) -Force | Out-Null
   git clone --depth 1 --branch $Branch $RepoUrl $InstallDir
   if ($LASTEXITCODE -ne 0) {
-    throw "git clone failed. Check the branch name (try main vs master) or network."
+    throw "git clone failed. Check the branch name (try master or release) or network."
   }
 }
 
