@@ -9,7 +9,7 @@ import { chromiumInstallHint } from "./playwrightHint.js";
 import { CHAT_URL, ChatGptSession, openPage } from "./session.js";
 import { hideBrowserWindow, showBrowserWindow } from "./hideWindow.js";
 import { diagnoseBrowserWindows, isWin32, windowDebugEnabled } from "./win32Window.js";
-import { defaultInstructionsPath, loadCliInstructions, CLI_USER_MESSAGE_SEPARATOR } from "./cliInstructions.js";
+import { defaultInstructionsPath, loadCliInstructions, CLI_USER_MESSAGE_SEPARATOR, formatTerminalSessionBlock, snapshotTerminalSize } from "./cliInstructions.js";
 import {
   conversationIdFromChatUrl,
   formatShortConversationId,
@@ -452,13 +452,29 @@ async function runRepl(
     historySize: 100,
   });
 
+  /** Last terminal size embedded in an outbound message (null until first send). */
+  let lastTerminalSent: { cols: number; rows: number } | null = null;
+
   async function sendChatMessage(toSend: string): Promise<void> {
     ui.printUserMessageBubble(toSend);
 
+    const { cols, rows } = snapshotTerminalSize();
+    const geomStale =
+      lastTerminalSent === null ||
+      lastTerminalSent.cols !== cols ||
+      lastTerminalSent.rows !== rows;
+    let sessionGeo = "";
+    if (geomStale) {
+      sessionGeo = `${formatTerminalSessionBlock(cols, rows)}\n\n`;
+      lastTerminalSent = { cols, rows };
+    }
+
     let payload = toSend;
     if (pendingPrime) {
-      payload = `${pendingPrime}${CLI_USER_MESSAGE_SEPARATOR}${toSend}`;
+      payload = `${pendingPrime}\n\n${sessionGeo}${CLI_USER_MESSAGE_SEPARATOR}${toSend}`;
       pendingPrime = "";
+    } else if (sessionGeo) {
+      payload = `${sessionGeo}${CLI_USER_MESSAGE_SEPARATOR}${toSend}`;
     }
 
     ui.miraReplyBegin();
@@ -570,6 +586,7 @@ async function runRepl(
         try {
           await session.newConversation();
           pendingPrime = !noPrime ? loadCliInstructions().trim() : "";
+          lastTerminalSent = null;
           ui.ok("New conversation. Blank slate, same swagger.");
         } catch (e) {
           ui.err(e instanceof Error ? e.message : String(e));
