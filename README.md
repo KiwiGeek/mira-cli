@@ -87,7 +87,7 @@ Full details: run `npm run mira -- --help` (or see `src/cli.ts`).
 
 ### REPL commands
 
-Examples: `/help`, `/version`, `/new`, `/name My chat title`, `/show`, `/quit`. On **`/quit`**, Mira **archives** the conversation by default and prints a `npm run mira -- --chat-url "…"` command you can use to resume.
+Examples: `/help`, `/version`, `/clear`, `/new`, `/name My chat title`, `/show`, `/quit`. On **`/quit`**, Mira **archives** the conversation by default and prints a `npm run mira -- --chat-url "…"` command you can use to resume.
 
 ## Custom instructions
 

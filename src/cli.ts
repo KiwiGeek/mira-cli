@@ -44,6 +44,16 @@ function reportPlaywrightLaunchFailure(e: unknown): never {
   process.exit(1);
 }
 
+/** Clear visible viewport (ANSI); non-TTY prints blank lines instead of escape codes. */
+function clearReplViewport(): void {
+  if (output.isTTY) {
+    output.write("\x1b[2J\x1b[H");
+  } else {
+    const rows = typeof output.rows === "number" && output.rows > 0 ? output.rows : 24;
+    console.log("\n".repeat(Math.min(rows + 8, 64)));
+  }
+}
+
 function parseChatUrlQuiet(raw: string): string | undefined {
   try {
     const u = new URL(raw.trim());
@@ -117,6 +127,7 @@ function printHelp(): void {
   helpRow("/name …", "Rename thread (alias /rename)");
   helpRow("/show", "Show browser, move window on-screen (Win32 + CDP)");
   helpRow("/debug-window", "Dump HWNDs (Windows · stderr)");
+  helpRow("/clear", "Clear the terminal viewport");
   helpRow("/help", "This help");
   helpRow("/version", "Show npm package version and git commit (when installed from a clone)");
   helpRow("/quit", "Exit — archives by default; saves thread to history + resume hints");
@@ -582,6 +593,10 @@ async function runRepl(
           }
           console.log();
         }
+        continue;
+      }
+      if (singleLine && one === "/clear") {
+        clearReplViewport();
         continue;
       }
       if (singleLine && (one.startsWith("/name ") || one.startsWith("/rename "))) {
