@@ -21,6 +21,7 @@ import {
 } from "./cliInstructions.js";
 import {
   conversationIdFromChatUrl,
+  formatConversationHandle,
   formatShortConversationId,
   listConversationsSorted,
   resolveConversationPrefix,
@@ -115,8 +116,8 @@ function printHelp(): void {
     `      ${ui.dim(`Print saved archive threads (default ${DEFAULT_HISTORY_LIST_LIMIT}); `)}` +
       `${ui.gray("--all")}${ui.dim(` shows up to ${String(HISTORY_LIST_CAP)}.`)}`,
   );
-  console.log(`    ${ui.gray("chatgpt-repl resume")} ${ui.dim("<id-prefix> [options…]")}`);
-  console.log(`      ${ui.dim("Resume a saved thread by short id (Docker-style prefix match).")}`);
+  console.log(`    ${ui.gray("chatgpt-repl resume")} ${ui.dim("<name-or-id-prefix> [options…]")}`);
+  console.log(`      ${ui.dim("Resume a saved thread by memorable name, or old short id prefix.")}`);
   console.log(`    ${ui.gray("chatgpt-repl")} ${ui.dim("[options…]")}`);
   console.log(
     `      ${ui.dim("Interactive REPL: ")}${ui.cyan("Shift+Enter")}${ui.dim(" newline; Enter sends. Pipes: line ends with ")}${ui.gray("\\")}${ui.dim(" + Enter.")}`,
@@ -225,16 +226,16 @@ function printArchivedConversationList(limit: number): void {
     return;
   }
 
-  const idW = 14;
+  const nameW = Math.max(18, ...rows.map((r) => formatConversationHandle(r).length + 2));
   const dateW = 26;
-  console.log(`  ${ui.gray("ID".padEnd(idW))}${ui.gray("ARCHIVED AT".padEnd(dateW))}${ui.gray("TITLE")}`);
+  console.log(`  ${ui.gray("NAME".padEnd(nameW))}${ui.gray("ARCHIVED AT".padEnd(dateW))}${ui.gray("TITLE")}`);
   for (const r of rows) {
-    const sid = formatShortConversationId(r.conversationId);
+    const sid = formatConversationHandle(r);
     const date = formatRecordedAt(r.recordedAt);
     const titleOut = r.title ? truncatePlain(r.title, 96) : ui.dim("(untitled)");
-    console.log(`  ${sid.padEnd(idW)} ${date.padEnd(dateW)} ${titleOut}`);
+    console.log(`  ${sid.padEnd(nameW)} ${date.padEnd(dateW)} ${titleOut}`);
   }
-  console.log(`  ${ui.dim(`Resume: npm run mira -- resume <id-prefix>`)}`);
+  console.log(`  ${ui.dim(`Resume: npm run mira -- resume <name>`)}`);
   console.log();
   ui.line();
   console.log();
@@ -325,7 +326,7 @@ function parseArgs(argv: string[]): ParsedCli {
 
   if (cmd === "resume") {
     if (!resumePartial?.trim()) {
-      console.error("[mira] Usage: chatgpt-repl resume <id-prefix> [options…]");
+      console.error("[mira] Usage: chatgpt-repl resume <name-or-id-prefix> [options…]");
       process.exit(2);
     }
     return {
@@ -735,14 +736,17 @@ async function runRepl(
           const cid = conversationIdFromChatUrl(r.conversationUrl);
           const titleForHistory =
             snapshotConvId && cid && snapshotConvId === cid ? snapshotTitle : null;
-          const resumeById =
-            cid !== null ? `npm run mira -- resume ${formatShortConversationId(cid)}` : undefined;
+          let resumeById: string | undefined;
+          if (cid !== null) {
+            upsertArchivedConversation({ url: r.conversationUrl, title: titleForHistory });
+            const hit = resolveConversationPrefix(formatShortConversationId(cid));
+            resumeById = hit.kind === "unique"
+              ? `npm run mira -- resume ${formatConversationHandle(hit.record)}`
+              : `npm run mira -- resume ${formatShortConversationId(cid)}`;
+          }
           ui.resumeCommand(`npm run mira -- --chat-url "${r.conversationUrl}"`, {
             resumeCli: resumeById,
           });
-          if (r.ok) {
-            upsertArchivedConversation({ url: r.conversationUrl, title: titleForHistory });
-          }
         } else if (r.acted && onExit === "delete") {
           ui.ok("Conversation deleted.");
         }
@@ -768,14 +772,14 @@ if (parsed.cmd === "login") {
 } else if (parsed.cmd === "resume") {
   const hit = resolveConversationPrefix(parsed.resumePartial);
   if (hit.kind === "none") {
-    console.error("[mira] No saved conversation matches that id prefix.");
+    console.error("[mira] No saved conversation matches that name or id prefix.");
     process.exit(2);
   }
   if (hit.kind === "ambiguous") {
-    console.error("[mira] Ambiguous id — prefix matches multiple threads:");
+    console.error("[mira] Ambiguous resume target — prefix matches multiple threads:");
     for (const m of hit.matches) {
       const title = m.title ? truncatePlain(m.title, 120) : "(untitled)";
-      console.error(`    ${formatShortConversationId(m.conversationId)}  ${formatRecordedAt(m.recordedAt)}  ${title}`);
+      console.error(`    ${formatConversationHandle(m)}  ${formatRecordedAt(m.recordedAt)}  ${title}`);
     }
     process.exit(2);
   }

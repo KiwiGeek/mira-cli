@@ -87,7 +87,9 @@ Full details: run `npm run mira -- --help` (or see `src/cli.ts`).
 
 ### REPL commands
 
-Examples: `/help`, `/version`, `/whoami`, `/instructions`, `/clear`, `/new`, `/name My chat title`, `/show`, `/quit`. On **`/quit`**, Mira **archives** the conversation by default and prints a `npm run mira -- --chat-url "…"` command you can use to resume.
+Examples: `/help`, `/version`, `/whoami`, `/instructions`, `/clear`, `/new`, `/name My chat title`, `/show`, `/quit`. On **`/quit`**, Mira **archives** the conversation by default and prints a `npm run mira -- resume <creative-name>` command, like `mira resume juggling-badger`, plus the direct `--chat-url` fallback.
+
+Use **`mira list`** to see archived conversations and their generated verb+noun names. Old short ID prefixes still work with **`mira resume`** for existing saved commands.
 
 ## Custom instructions
 
