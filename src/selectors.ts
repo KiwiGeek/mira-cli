@@ -12,8 +12,11 @@ function archiveDbg(...args: unknown[]): void {
 
 /**
  * ChatGPT's DOM changes frequently. These are ordered fallback strategies.
- * The live composer is usually a ProseMirror `div#prompt-textarea`; a `textarea` may exist for
- * accessibility but sit *under* the contenteditable and intercept pointer checks — avoid clicking it.
+ *
+ * 2026-11 UI: the composer is a bare ProseMirror `div[contenteditable][role=textbox]`
+ * (`aria-label="Work with ChatGPT"`) — the old `div#prompt-textarea` wrapper is gone, which used to
+ * be the only thing `waitForComposerMount` accepted. A `textarea` may exist for accessibility but sits
+ * *under* the contenteditable and intercepts pointer checks — avoid clicking it.
  */
 
 /** Archive / system banners can sit above the composer until dismissed. */
@@ -43,26 +46,46 @@ async function tryDismissArchiveOrBlockingUi(page: Page): Promise<void> {
   }
 }
 
+/** Ordered locator strategies for the message composer (see the note above). */
+function composerStrategies(page: Page): Array<() => Locator> {
+  return [
+    () => page.locator('div#prompt-textarea[contenteditable="true"]'),
+    () => page.locator('form div[contenteditable="true"][role="textbox"]'),
+    () => page.locator('div[contenteditable="true"][data-virtualkeyboard="true"]'),
+    () => page.getByRole("textbox", { name: /work with chatgpt|chat with chatgpt/i }),
+    () => page.locator('div#prompt-textarea[role="textbox"]'),
+    () => page.locator("div#prompt-textarea"),
+    () => page.locator("div.ProseMirror[contenteditable=\"true\"]"),
+    () => page.getByRole("textbox", { name: /message|ask anything/i }),
+  ];
+}
+
+/** First match of `loc` that is actually usable (visible or laid out with real size). */
+async function firstUsable(loc: Locator): Promise<Locator | null> {
+  const n = await loc.count().catch(() => 0);
+  for (let i = 0; i < Math.min(n, 8); i++) {
+    const cand = loc.nth(i);
+    if (await isUsablePrompt(cand)) return cand;
+  }
+  return null;
+}
+
 export async function waitForComposerMount(page: Page, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastErr: unknown;
   while (Date.now() < deadline) {
     await tryDismissArchiveOrBlockingUi(page);
     try {
-      const strategies: Locator[] = [
-        page.locator('div#prompt-textarea[contenteditable="true"]').first(),
-        page.locator('div#prompt-textarea[role="textbox"]').first(),
-        page.locator("div#prompt-textarea").first(),
-      ];
-      for (const loc of strategies) {
-        if ((await loc.count()) === 0) continue;
+      for (const make of composerStrategies(page)) {
+        const loc = make();
+        if ((await loc.count().catch(() => 0)) === 0) continue;
         try {
-          await loc.waitFor({ state: "attached", timeout: 2_500 });
+          await loc.first().waitFor({ state: "attached", timeout: 1_000 });
         } catch (e) {
           lastErr = e;
           continue;
         }
-        if (await isUsablePrompt(loc)) return;
+        if (await firstUsable(loc)) return;
       }
     } catch (e) {
       lastErr = e;
@@ -85,21 +108,12 @@ async function isUsablePrompt(loc: Locator): Promise<boolean> {
 }
 
 export async function findPromptBox(page: Page): Promise<Locator> {
-  const strategies: Array<() => Locator> = [
-    () => page.locator('div#prompt-textarea[contenteditable="true"]'),
-    () => page.getByRole("textbox", { name: /chat with chatgpt/i }),
-    () => page.locator('div#prompt-textarea[role="textbox"]'),
-    () => page.locator("div#prompt-textarea"),
-    () => page.getByRole("textbox", { name: /message|ask anything/i }),
-    () => page.locator('div[contenteditable="true"][data-virtualkeyboard="true"]').last(),
-    () => page.locator('div.ProseMirror[contenteditable="true"]').last(),
-  ];
-  for (const make of strategies) {
+  for (const make of composerStrategies(page)) {
     try {
-      const loc = make().first();
-      if (await isUsablePrompt(loc)) {
-        await loc.scrollIntoViewIfNeeded().catch(() => undefined);
-        return loc;
+      const hit = await firstUsable(make());
+      if (hit) {
+        await hit.scrollIntoViewIfNeeded().catch(() => undefined);
+        return hit;
       }
     } catch {
       /* try next */
@@ -113,6 +127,10 @@ export async function findPromptBox(page: Page): Promise<Locator> {
 export function assistantMessageLocator(page: Page): Locator {
   return page.locator(
     [
+      // 2026-11 UI: turns are `[data-turn-key]`; the assistant bubble carries this marker.
+      "[data-local-conversation-final-assistant]",
+      '[data-chatgpt-search-unit-key$=":assistant"]',
+      // Legacy markup kept as fallbacks.
       '[data-message-author-role="assistant"]',
       '[data-testid="conversation-turn-assistant"]',
       'div[data-role="assistant"]',
@@ -295,6 +313,14 @@ async function openViaConversationOptionsTrigger(
 
 async function openViaHeaderMenu(page: Page): Promise<boolean> {
   const openers: Array<[string, Locator]> = [
+    [
+      "header button[aria-label=Chat actions] (2026-11 UI)",
+      page.locator('header button[aria-label="Chat actions"][aria-haspopup="menu"]'),
+    ],
+    [
+      "main button[aria-label=Chat actions] (header not matched)",
+      page.locator('main button[aria-label="Chat actions"][aria-haspopup="menu"]'),
+    ],
     ["getByTestId(conversation-menu-button)", page.getByTestId("conversation-menu-button")],
     ["locator([data-testid=conversation-menu-button])", page.locator('[data-testid="conversation-menu-button"]')],
     [
@@ -475,7 +501,8 @@ export async function archiveOrDeleteActiveConversation(
     ? [
         page.getByRole("menuitem", { name: /^move to archive$/i }),
         page.getByRole("menuitem", { name: /^archive$/i }),
-        page.getByRole("menuitem", { name: /archive chat/i }),
+        // Anchored so it cannot match the "Unarchive" item offered for archived chats.
+        page.getByRole("menuitem", { name: /^archive chat$/i }),
         page.getByRole("button", { name: /^move to archive$/i }),
         page.getByRole("button", { name: /^archive$/i }),
       ]

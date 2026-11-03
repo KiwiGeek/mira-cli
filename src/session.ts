@@ -15,10 +15,14 @@ const COMPOSER_READY_MS = 120_000;
 
 async function submitMessage(page: Page): Promise<void> {
   const sendCandidates = [
+    // 2026-11 UI: no data-testid; the send control is a submit button labelled "Send" that only
+    // exists once the composer is non-empty.
+    page.locator('button[type="submit"][aria-label*="send" i]'),
     page.getByTestId("send-button"),
     page.getByRole("button", { name: /^send$/i }),
     page.locator('button[data-testid*="send"]'),
     page.locator('button[aria-label*="Send"]'),
+    page.locator('form button[type="submit"]'),
   ];
   for (const loc of sendCandidates) {
     const b = loc.first();
@@ -39,7 +43,10 @@ async function lastAssistantText(page: Page): Promise<string> {
   if (n === 0) return "";
   return (
     await loc.nth(n - 1).evaluate((el: HTMLElement) => {
-      const norm = (t: string) => t.replace(/\r\n/g, "\n").trimEnd();
+      // The turn container starts with a visually-hidden "You said:" / "ChatGPT said:" label that
+      // innerText still includes; strip it so replies are not prefixed by it.
+      const norm = (t: string) =>
+        t.replace(/\r\n/g, "\n").replace(/^(You|ChatGPT) said:\s*/i, "").trimEnd();
       if (!el.querySelector("li")) {
         return norm(el.innerText);
       }
@@ -89,14 +96,23 @@ async function lastAssistantText(page: Page): Promise<string> {
   ).trimEnd();
 }
 
+/**
+ * Wait for the "Stop generating" control to disappear — but only if it ever appeared, and never for
+ * very long. 2026-11 UI keeps other stop-ish buttons in the page; the old version waited out the whole
+ * remaining reply budget for one of those to hide, so replies looked like they timed out.
+ */
 async function waitForStopHidden(page: Page, timeoutMs: number): Promise<void> {
-  const stop = page.getByRole("button", { name: /stop|stop generating/i }).first();
-  try {
-    await stop.waitFor({ state: "visible", timeout: 25_000 });
-  } catch {
-    /* fast responses may never show Stop */
-  }
-  await stop.waitFor({ state: "hidden", timeout: timeoutMs }).catch(() => undefined);
+  const stop = page
+    .getByRole("button", { name: /^(stop|stop generating|stop streaming|stop responding)$/i })
+    .first();
+  const appeared = await stop
+    .waitFor({ state: "visible", timeout: Math.min(4_000, timeoutMs) })
+    .then(() => true)
+    .catch(() => false);
+  if (!appeared) return;
+  await stop
+    .waitFor({ state: "hidden", timeout: Math.min(timeoutMs, 30_000) })
+    .catch(() => undefined);
 }
 
 /** Optional callback while the latest assistant message is still being written in the DOM. */
